@@ -3,7 +3,8 @@
 A small, self-hosted [MCP](https://modelcontextprotocol.io) server for a restricted
 operator pilot. It exposes tools to an AI client over Streamable HTTP, and every call
 is authenticated, authorized by group membership, and recorded in a tamper-evident
-audit log. The first release intentionally has **no host shell or Kubernetes access**.\nIt does not replace existing break-glass or remote management tools.
+audit log. The first release intentionally has **no host shell or Kubernetes access**.
+It does not replace existing break-glass or remote management tools.
 
 ## Status
 
@@ -17,7 +18,9 @@ host-changing tools yet, and the exec tier is wired but unused.
 - **Authentication.** FastMCP's OIDC proxy performs OAuth 2.1 with PKCE (S256) against
   your OpenID Connect provider. The server issues its own tokens, and dynamic
   client registration only accepts redirect URIs in
-  `allowed_client_redirect_uris`. The default list covers ChatGPT and the\n  documented exact Claude.ai manual OAuth-client callback; validate both client\n  flows end to end before public exposure.
+  `allowed_client_redirect_uris`. The default list covers ChatGPT and the
+  documented exact Claude.ai manual OAuth-client callback; validate both client
+  flows end to end before public exposure.
 - **Authorization.** The token's groups claim decides access. Each tool carries exactly
   one tier tag:
   - `read`: needs `required_group`.
@@ -29,7 +32,9 @@ host-changing tools yet, and the exec tier is wired but unused.
 - **Audit log.** Append-only JSONL. Each record stores the SHA-256 of the previous line.
   Verify with `operator-mcp audit-verify <path>`. Call arguments and error details are
   passed through best-effort secret redaction before they are written.
-- **Network.** The server binds to loopback by default. A Pod may opt into\n  `host = "0.0.0.0"` with `allow_pod_bind = true` only behind a ClusterIP,\n  restricted NetworkPolicy and approved TLS ingress; it does not expose host networking.
+- **Network.** The server binds to loopback by default. A Pod may opt into
+  `host = "0.0.0.0"` with `allow_pod_bind = true` only behind a ClusterIP,
+  restricted NetworkPolicy and approved TLS ingress; it does not expose host networking.
 
 ## Security model: what this does NOT protect against
 
@@ -59,7 +64,8 @@ Non-secret settings live in TOML. Secrets come only from the environment.
 ```toml
 # /etc/operator-mcp/config.toml
 [server]
-host = "127.0.0.1"                     # default; Pod may use 0.0.0.0\nallow_pod_bind = false                  # true only for an isolated Pod listener
+host = "127.0.0.1"                     # default; Pod may use 0.0.0.0
+allow_pod_bind = false                  # true only for an isolated Pod listener
 port = 8795
 public_url = "https://mcp.example.com" # https only; the reverse proxy serves this
 state_dir = "/var/lib/operator-mcp"    # DISABLED kill-switch file lives here
@@ -124,4 +130,25 @@ provider on loopback, so it needs no network access.
 ## License
 
 Apache License 2.0. See [LICENSE](LICENSE).
-\n## k3s dual-client pilot (ops #461)\n\nThe deployment definitions and approval gates live in `yesvus/ops` under\n`cluster/operator-mcp-pilot/`. The client URL will be\n`https://mcp.yesvus.com/mcp`; do not expose this endpoint until the Authentik\nMFA fresh-login gate (#803), verified image digest and protected-route review pass.\n\n- ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check\n  the exact callback selected by the ChatGPT plugin builder; write-tool support\n  must be proven on the **actual account**.\n- Claude.ai: prefer its published client identity when compatible; otherwise\n  choose automatic registration, with an exact fallback callback\n  `https://claude.ai/api/mcp/auth_callback`. Never permit a wildcard Claude domain.\n- The FastMCP OAuth storage backend must be explicitly verified on Linux.\n  A data directory alone does **not** prove that DCR registrations survive\n  process restarts. Reconnect/re-register and token lifecycle are acceptance tests.\n- Scratch notes, audit records and the kill switch use an isolated volume.\n  Audits redact secrets best-effort; they must not be treated as durable external\n  evidence until exported to the logging pipeline.\n- No developer-agent credentials, Docker socket, host paths, kubeconfig,\n  service-account token or host-operation tools are part of this pilot.\n
+
+## k3s dual-client pilot (ops #461)
+
+The deployment definitions and approval gates live in `yesvus/ops` under
+`cluster/operator-mcp-pilot/`. The client URL will be
+`https://mcp.yesvus.com/mcp`; do not expose this endpoint until the Authentik
+MFA fresh-login gate (#803), verified image digest and protected-route review pass.
+
+- ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check
+  the exact callback selected by the ChatGPT plugin builder; write-tool support
+  must be proven on the **actual account**.
+- Claude.ai: prefer its published client identity when compatible; otherwise
+  choose automatic registration, with an exact fallback callback
+  `https://claude.ai/api/mcp/auth_callback`. Never permit a wildcard Claude domain.
+- The FastMCP OAuth storage backend must be explicitly verified on Linux.
+  A data directory alone does **not** prove that DCR registrations survive
+  process restarts. Reconnect/re-register and token lifecycle are acceptance tests.
+- Scratch notes, audit records and the kill switch use an isolated volume.
+  Audits redact secrets best-effort; they must not be treated as durable external
+  evidence until exported to the logging pipeline.
+- No developer-agent credentials, Docker socket, host paths, kubeconfig,
+  service-account token or host-operation tools are part of this pilot.
