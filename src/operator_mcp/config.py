@@ -171,7 +171,7 @@ def validate(cfg: Config) -> None:
         raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
         # Pod networking needs all interfaces; only with the explicit opt-in.
-        if not (cfg.server.host == "0.0.0.0" and cfg.server.allow_pod_bind):  # noqa: S104
+        if not (cfg.server.host == "0.0.0.0" and cfg.server.allow_pod_bind):  # noqa: S104  # noqa: S104
             raise ConfigError("server.host must be loopback unless allow_pod_bind is true")
     if not cfg.server.public_url.startswith("https://"):
         raise ConfigError("server.public_url must be an https:// URL")
