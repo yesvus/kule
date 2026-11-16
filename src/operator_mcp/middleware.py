@@ -46,7 +46,13 @@ class OperatorMiddleware(Middleware):
 
     async def _audit(self, event: str, **fields: Any) -> None:
         # flock + fsync block; keep them off the event loop.
-        await asyncio.to_thread(self.audit.write, event, **fields)
+        # Shielded so a cancelled request still finishes its audit record.
+        task = asyncio.ensure_future(asyncio.to_thread(self.audit.write, event, **fields))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
 
     def _caller(self) -> Caller | None:
         return self.policy.caller_from_claims(self.claims_getter())

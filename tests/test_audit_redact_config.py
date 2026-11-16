@@ -206,3 +206,41 @@ def test_redact_truncates_long_strings():
 def test_config_rejects_wrong_types(tmp_path, old, new, msg):
     with pytest.raises(ConfigError, match=msg):
         load_config(write(tmp_path, GOOD.replace(old, new, 1)), ENV)
+
+
+def test_redact_masks_truncated_private_key():
+    key = "-----BEGIN RSA PRIVATE KEY-----\n" + "QUJD" * 2000 + "\n-----END RSA PRIVATE KEY-----"
+    out = redact_text("prefix " + key)
+    assert "QUJD" not in out
+
+
+def test_redact_keeps_colliding_keys():
+    out = redact({"password=a": 1, "password=b": 2})
+    assert len(out) == 2
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "msg"),
+    [
+        (
+            'public_url = "https://mcp.example.com"',
+            'public_url = "https://mcp.example.com"\nport = true',
+            "integer",
+        ),
+        (
+            'public_url = "https://mcp.example.com"',
+            'public_url = "https://mcp.example.com"\nport = "8795"',
+            "integer",
+        ),
+        (
+            'public_url = "https://mcp.example.com"',
+            'public_url = "https://mcp.example.com"\nstate_dir = ""',
+            "empty",
+        ),
+        ("[auth]\n", "[tools]\ntimeout_seconds = true\n[auth]\n", "number"),
+        ("[auth]\n", '[tools]\nscratch_dir = " "\n[auth]\n', "empty"),
+    ],
+)
+def test_config_rejects_bad_numbers_and_empty_paths(tmp_path, old, new, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_config(write(tmp_path, GOOD.replace(old, new, 1)), ENV)

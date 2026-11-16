@@ -55,7 +55,12 @@ def register(mcp: FastMCP, cfg: Config, claims_getter: ClaimsGetter, policy: Pol
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
         try:
             os.fchmod(fd, 0o600)
-            os.write(fd, body)
+            view = memoryview(body)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write")
+                view = view[written:]
         finally:
             os.close(fd)
         return {

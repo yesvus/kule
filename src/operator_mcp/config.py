@@ -85,6 +85,25 @@ def _str(value: object, name: str) -> str:
     return value
 
 
+def _int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{name} must be an integer (unquoted)")
+    return value
+
+
+def _float(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ConfigError(f"{name} must be a number (unquoted)")
+    return float(value)
+
+
+def _path(value: object, name: str) -> Path:
+    text = _str(value, name)
+    if not text.strip():
+        raise ConfigError(f"{name} must not be empty")
+    return Path(text)
+
+
 def _bool(value: object, name: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{name} must be true or false (unquoted)")
@@ -109,9 +128,9 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 
     server = ServerConfig(
         host=_str(s.get("host", "127.0.0.1"), "server.host"),
-        port=int(s.get("port", 8795)),
+        port=_int(s.get("port", 8795), "server.port"),
         public_url=_str(s.get("public_url", ""), "server.public_url").rstrip("/"),
-        state_dir=Path(_str(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir")),
+        state_dir=_path(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir"),
     )
     auth = AuthConfig(
         oidc_config_url=_str(a.get("oidc_config_url", ""), "auth.oidc_config_url"),
@@ -127,15 +146,15 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
     )
     audit = AuditConfig(
-        path=Path(_str(au.get("path", "/var/log/operator-mcp/audit.jsonl"), "audit.path"))
+        path=_path(au.get("path", "/var/log/operator-mcp/audit.jsonl"), "audit.path")
     )
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
-        scratch_dir=Path(
-            _str(t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir")
+        scratch_dir=_path(
+            t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
         ),
-        timeout_seconds=float(t.get("timeout_seconds", 30.0)),
-        max_output_bytes=int(t.get("max_output_bytes", 64 * 1024)),
+        timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
+        max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),
     )
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)

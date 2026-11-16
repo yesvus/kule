@@ -15,6 +15,8 @@ MAX_SCAN_CHARS = 4096
 
 _PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
+    # A key cut off by truncation (or pasted without its END line): mask to the end.
+    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*\Z", re.S),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
     # Any Authorization header value, whatever the scheme (Basic, Token, ...).
     re.compile(r"(?i)(\bauthorization)(\s*[=:]\s*)([^\r\n,;}\]]+)"),
@@ -56,6 +58,9 @@ def redact(value: Any) -> Any:
             if isinstance(k, str):
                 sensitive = bool(_SENSITIVE_KEYS.search(k))
                 k = redact_text(k)
+                base, n = k, 2
+                while k in out:  # keep distinct fields whose keys redact alike
+                    k, n = f"{base}#{n}", n + 1
                 out[k] = MASK if sensitive else redact(v)
             else:
                 out[k] = redact(v)
