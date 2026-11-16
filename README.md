@@ -133,7 +133,7 @@ Apache License 2.0. See [LICENSE](LICENSE).
 
 ## k3s dual-client pilot (ops #461)
 
-The deployment definitions and approval gates live in `yesvus/ops` under
+The deployment definitions and approval gates live in [yesvus/ops](https://github.com/yesvus/ops) under
 `cluster/operator-mcp-pilot/`. The client URL will be
 `https://mcp.yesvus.com/mcp`; do not expose this endpoint until the Authentik
 MFA fresh-login gate (#803), verified image digest and protected-route review pass.
