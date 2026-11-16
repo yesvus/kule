@@ -12,6 +12,8 @@ from pathlib import Path
 DEFAULT_ALLOWED_CLIENT_REDIRECTS = [
     "https://chatgpt.com/connector_platform_oauth_redirect",
     "https://chatgpt.com/connector/oauth/*",
+    # Claude.ai documented manual OAuth-client callback. Keep exact, not a domain wildcard.
+    "https://claude.ai/api/mcp/auth_callback",
 ]
 
 SECRET_ENV = {
@@ -27,6 +29,8 @@ class ConfigError(ValueError):
 @dataclass(frozen=True)
 class ServerConfig:
     host: str = "127.0.0.1"
+    # Allow a Pod listener only with an explicit opt-in; never broaden host defaults.
+    allow_pod_bind: bool = False
     port: int = 8795
     public_url: str = ""
     state_dir: Path = Path("/var/lib/operator-mcp")
@@ -128,6 +132,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 
     server = ServerConfig(
         host=_str(s.get("host", "127.0.0.1"), "server.host"),
+        allow_pod_bind=_bool(s.get("allow_pod_bind", False), "server.allow_pod_bind"),
         port=_int(s.get("port", 8795), "server.port"),
         public_url=_str(s.get("public_url", ""), "server.public_url").rstrip("/"),
         state_dir=_path(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir"),
@@ -165,7 +170,8 @@ def validate(cfg: Config) -> None:
     if not 1 <= cfg.server.port <= 65535:
         raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
-        raise ConfigError("server.host must be loopback; publish through a reverse proxy")
+        if not (cfg.server.host == "0.0.0.0" and cfg.server.allow_pod_bind):
+            raise ConfigError("server.host must be loopback unless allow_pod_bind is true")
     if not cfg.server.public_url.startswith("https://"):
         raise ConfigError("server.public_url must be an https:// URL")
     if not cfg.auth.oidc_config_url.startswith("https://"):
