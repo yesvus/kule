@@ -23,6 +23,15 @@ class Caller:
     groups: frozenset[str]
 
 
+def normalize_groups(raw: Any) -> frozenset[str]:
+    """Accept a string or a list of strings; anything else means no groups."""
+    if isinstance(raw, str):
+        return frozenset([raw])
+    if isinstance(raw, list):
+        return frozenset(g for g in raw if isinstance(g, str))
+    return frozenset()
+
+
 @dataclass(frozen=True)
 class Policy:
     required_group: str
@@ -30,16 +39,19 @@ class Policy:
     exec_enabled: bool
     groups_claim: str = "groups"
 
+    def __post_init__(self) -> None:
+        if not self.required_group or not self.exec_group:
+            raise ValueError("required_group and exec_group must be non-empty")
+        if self.required_group == self.exec_group:
+            raise ValueError("exec_group must differ from required_group")
+
     def caller_from_claims(self, claims: Mapping[str, Any] | None) -> Caller | None:
         if not claims:
             return None
         sub = claims.get("sub")
         if not isinstance(sub, str) or not sub:
             return None
-        raw = claims.get(self.groups_claim) or []
-        if isinstance(raw, str):
-            raw = [raw]
-        groups = frozenset(g for g in raw if isinstance(g, str))
+        groups = normalize_groups(claims.get(self.groups_claim))
         username = claims.get("preferred_username") or claims.get("email") or sub
         return Caller(subject=sub, username=str(username), groups=groups)
 

@@ -59,6 +59,7 @@ def build_server(
         audit=audit,
         kill_switch=cfg.kill_switch_path,
         timeout_seconds=cfg.tools.timeout_seconds,
+        max_output_bytes=cfg.tools.max_output_bytes,
         claims_getter=claims_getter,
     )
     mcp = FastMCP(

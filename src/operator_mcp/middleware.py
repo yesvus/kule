@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -33,12 +34,14 @@ class OperatorMiddleware(Middleware):
         audit: AuditLog,
         kill_switch: Path,
         timeout_seconds: float,
+        max_output_bytes: int = 64 * 1024,
         claims_getter: ClaimsGetter = claims_from_request,
     ) -> None:
         self.policy = policy
         self.audit = audit
         self.kill_switch = kill_switch
         self.timeout_seconds = timeout_seconds
+        self.max_output_bytes = max_output_bytes
         self.claims_getter = claims_getter
 
     def _caller(self) -> Caller | None:
@@ -83,23 +86,47 @@ class OperatorMiddleware(Middleware):
         ok, reason = self.policy.allows(caller, tool.tags)
         if not ok:
             self.audit.write("denied", reason=reason, args=args, **who)
-            raise AuthorizationError(f"not authorized: {reason}")
+            # Keep the policy detail in the audit record, not in the response.
+            raise AuthorizationError("not authorized")
 
         tier = self.policy.tier_of(tool.tags)
         self.audit.write("call", tier=tier, args=args, **who)
         start = time.monotonic()
+        deadline = asyncio.timeout(self.timeout_seconds)
         try:
-            result = await asyncio.wait_for(call_next(context), timeout=self.timeout_seconds)
+            async with deadline:
+                result = await call_next(context)
         except TimeoutError:
+            if not deadline.expired():
+                # Raised by the tool itself, not by our deadline.
+                self.audit.write("error", duration_ms=_ms(start), error="TimeoutError", **who)
+                raise
             self.audit.write("timeout", duration_ms=_ms(start), **who)
             raise ToolError(f"tool timed out after {self.timeout_seconds:g}s") from None
+        except asyncio.CancelledError:
+            self.audit.write("cancelled", duration_ms=_ms(start), **who)
+            raise
         except Exception as exc:
             self.audit.write(
                 "error", duration_ms=_ms(start), error=type(exc).__name__, detail=str(exc), **who
             )
             raise
-        self.audit.write("result", duration_ms=_ms(start), **who)
+        size = _result_size(result)
+        if size > self.max_output_bytes:
+            self.audit.write("oversize", duration_ms=_ms(start), bytes=size, **who)
+            raise ToolError(f"tool output exceeds {self.max_output_bytes} bytes")
+        self.audit.write("result", duration_ms=_ms(start), bytes=size, **who)
         return result
+
+
+def _result_size(result: ToolResult) -> int:
+    """Approximate serialized size of a tool result (content + structured)."""
+    parts = [getattr(c, "text", "") or "" for c in (result.content or [])]
+    size = sum(len(p.encode()) for p in parts)
+    structured = getattr(result, "structured_content", None)
+    if structured is not None:
+        size += len(json.dumps(structured, default=str).encode())
+    return size
 
 
 def _ms(start: float) -> int:

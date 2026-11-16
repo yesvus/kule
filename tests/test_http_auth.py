@@ -144,8 +144,10 @@ async def test_registration_rejects_arbitrary_redirect_uri(
     body = {**DCR_BODY, "redirect_uris": [redirect_uri]}
     async with running_app(make_cfg, oidc_discovery_url, monkeypatch, tmp_path) as client:
         resp = await client.post("/register", json=body)
-    assert 400 <= resp.status_code < 500
-    assert "client_id" not in resp.json()
+    assert resp.status_code == 400
+    body = resp.json()
+    assert body.get("error") == "invalid_redirect_uri"
+    assert "client_id" not in body
 
 
 @pytest.mark.parametrize(

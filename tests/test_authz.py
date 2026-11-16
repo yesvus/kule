@@ -1,3 +1,5 @@
+import pytest
+
 from operator_mcp.authz import EXEC, OPERATE, READ, Policy
 
 P = Policy(required_group="ops", exec_group="ops-exec", exec_enabled=True)
@@ -47,3 +49,16 @@ def test_string_groups_claim_and_non_string_entries():
     assert c.groups == {"ops"}
     c = P.caller_from_claims({"sub": "u", "groups": ["ops", 1, None]})
     assert c.groups == {"ops"}
+
+
+@pytest.mark.parametrize("raw", [{"ops": True}, 1, True, None, ("ops",)])
+def test_non_list_groups_claims_grant_nothing(raw):
+    c = P.caller_from_claims({"sub": "u", "groups": raw})
+    assert c.groups == frozenset()
+    assert P.allows(c, {READ})[0] is False
+
+
+@pytest.mark.parametrize(("req", "exe"), [("ops", "ops"), ("ops", ""), ("", "x")])
+def test_policy_rejects_collapsed_exec_gate(req, exe):
+    with pytest.raises(ValueError):
+        Policy(required_group=req, exec_group=exe, exec_enabled=True)

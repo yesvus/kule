@@ -40,7 +40,3 @@ class Claims:
 @pytest.fixture
 def claims() -> Claims:
     return Claims()
-
-
-OPERATOR = {"sub": "u1", "preferred_username": "owner", "groups": ["ops"]}
-OUTSIDER = {"sub": "u2", "preferred_username": "guest", "groups": ["viewers"]}

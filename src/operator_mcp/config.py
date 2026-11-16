@@ -79,6 +79,12 @@ def _section(data: dict, name: str) -> dict:
     return value
 
 
+def _string_list(value: object, name: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError(f"{name} must be an array of strings")
+    return list(value)
+
+
 def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     with path.open("rb") as fh:
@@ -101,8 +107,9 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         required_group=a.get("required_group", "mcp-operators"),
         exec_group=a.get("exec_group", "mcp-exec"),
         groups_claim=a.get("groups_claim", "groups"),
-        allowed_client_redirect_uris=list(
-            a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS)
+        allowed_client_redirect_uris=_string_list(
+            a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
+            "auth.allowed_client_redirect_uris",
         ),
         client_secret=env.get(SECRET_ENV["client_secret"], ""),
         jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
@@ -120,6 +127,8 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 
 
 def validate(cfg: Config) -> None:
+    if not 1 <= cfg.server.port <= 65535:
+        raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
         raise ConfigError("server.host must be loopback; publish through a reverse proxy")
     if not cfg.server.public_url.startswith("https://"):
@@ -132,9 +141,13 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['client_secret']} is not set")
     if len(cfg.auth.jwt_signing_key) < 32:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
-    if not cfg.auth.required_group:
-        raise ConfigError("auth.required_group must not be empty")
+    if not cfg.auth.required_group or not cfg.auth.exec_group:
+        raise ConfigError("auth.required_group and auth.exec_group must not be empty")
+    if cfg.auth.required_group == cfg.auth.exec_group:
+        raise ConfigError("auth.exec_group must differ from auth.required_group")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
     if not 1 <= cfg.tools.timeout_seconds <= 110:
         raise ConfigError("tools.timeout_seconds must be between 1 and 110")
+    if not 1024 <= cfg.tools.max_output_bytes <= 1024 * 1024:
+        raise ConfigError("tools.max_output_bytes must be between 1024 and 1048576")

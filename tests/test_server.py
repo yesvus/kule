@@ -1,9 +1,9 @@
 import json
 
 import pytest
-from conftest import OPERATOR, OUTSIDER
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
+from helpers import OPERATOR, OUTSIDER
 
 from operator_mcp.audit import verify
 from operator_mcp.server import build_server
@@ -62,10 +62,10 @@ async def test_note_write_rejects_path_tricks(server, claims):
     cfg, mcp = server
     claims.value = OPERATOR
     async with Client(mcp) as client:
-        for bad in ("../etc", "a/b", "UPPER", ""):
+        for bad in ("../etc", "a/b", "UPPER", "", "abc\n", "-lead"):
             with pytest.raises(ToolError):
                 await client.call_tool("note_write", {"name": bad, "text": "x"})
-    assert not any(cfg.tools.scratch_dir.glob("*")) if cfg.tools.scratch_dir.exists() else True
+    assert not cfg.tools.scratch_dir.exists()
 
 
 async def test_audit_redacts_secrets_in_arguments(server, claims):
@@ -86,3 +86,49 @@ async def test_read_tools_are_marked_read_only(server, claims):
         tools = {t.name: t for t in await client.list_tools()}
     assert tools["whoami"].annotations.read_only_hint is True
     assert tools["note_write"].annotations.read_only_hint is False
+
+
+async def test_denial_message_does_not_leak_policy(server, claims):
+    cfg, mcp = server
+    claims.value = OUTSIDER
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError) as exc:
+            await client.call_tool("whoami", {})
+    assert "ops" not in str(exc.value)
+    assert audit_events(cfg)[-1]["reason"] == "caller is not in ops"
+
+
+def _extra_tools(mcp):
+    import asyncio
+
+    @mcp.tool(tags={"read"})
+    def big() -> str:
+        return "x" * 200_000
+
+    @mcp.tool(tags={"read"})
+    async def inner_timeout() -> str:
+        raise TimeoutError("upstream took too long")
+
+    @mcp.tool(tags={"read"})
+    async def slow() -> str:
+        await asyncio.sleep(5)
+        return "late"
+
+
+async def test_output_cap_timeout_and_inner_timeout(make_cfg, claims):
+    from operator_mcp.server import build_server
+
+    cfg = make_cfg(timeout_seconds=1.0)
+    mcp = build_server(cfg, claims_getter=claims)
+    _extra_tools(mcp)
+    claims.value = OPERATOR
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="exceeds"):
+            await client.call_tool("big", {})
+        with pytest.raises(ToolError):
+            await client.call_tool("inner_timeout", {})
+        with pytest.raises(ToolError, match="timed out"):
+            await client.call_tool("slow", {})
+    events = [(e["tool"], e["event"]) for e in audit_events(cfg) if e["event"] != "call"]
+    assert events == [("big", "oversize"), ("inner_timeout", "error"), ("slow", "timeout")]
+    assert verify(cfg.audit.path)[0]

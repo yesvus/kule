@@ -11,6 +11,8 @@ license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "fastmcp==4.2.0",
+    # Imported directly by the middleware; also a fastmcp dependency.
+    "mcp-types>=2.3,<3",
 ]
 
 [project.optional-dependencies]
@@ -18,6 +20,8 @@ dev = [
     "pytest>=8",
     "pytest-asyncio>=0.24",
     "ruff>=0.6",
+    # ASGI test client used by tests/test_http_auth.py; also an mcp dependency.
+    "httpx2>=2.16",
 ]
 
 [project.scripts]

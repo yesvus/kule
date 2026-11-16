@@ -10,12 +10,12 @@ from typing import Annotated
 from fastmcp import FastMCP
 from pydantic import Field
 
-from ..authz import OPERATE, READ
+from ..authz import OPERATE, READ, normalize_groups
 from ..config import Config
 from ..middleware import ClaimsGetter
 from ..redact import redact_text
 
-_NOTE_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+_NOTE_NAME = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 MAX_NOTE_BYTES = 4096
 
 
@@ -24,11 +24,11 @@ def register(mcp: FastMCP, cfg: Config, claims_getter: ClaimsGetter) -> None:
     def whoami() -> dict:
         """Show who the server thinks you are and which host it runs on."""
         claims = claims_getter() or {}
-        groups = claims.get(cfg.auth.groups_claim) or []
+        groups = normalize_groups(claims.get(cfg.auth.groups_claim))
         return {
             "user": claims.get("preferred_username") or claims.get("email"),
             "subject": claims.get("sub"),
-            "groups": sorted(g for g in groups if isinstance(g, str)),
+            "groups": sorted(groups),
             "host": socket.gethostname(),
             "exec_enabled": cfg.tools.exec_enabled,
         }
@@ -42,7 +42,7 @@ def register(mcp: FastMCP, cfg: Config, claims_getter: ClaimsGetter) -> None:
         text: Annotated[str, Field(description=f"note body, at most {MAX_NOTE_BYTES} bytes")],
     ) -> dict:
         """Write a short note to the server's scratch directory. Harmless test of write access."""
-        if not _NOTE_NAME.match(name):
+        if not _NOTE_NAME.fullmatch(name):
             raise ValueError("name must match ^[a-z0-9][a-z0-9-]{0,63}$")
         body = redact_text(text).encode()
         if len(body) > MAX_NOTE_BYTES:

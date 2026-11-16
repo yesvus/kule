@@ -43,6 +43,8 @@ host-changing tools yet, and the exec tier is wired but unused.
 - **Redaction is best-effort.** Known token shapes and `key=value` secrets are masked.
   Unusual secret formats can still reach the audit log or tool output. Tools must not
   read secrets in the first place.
+- **The newest audit record is unprotected.** The chain only covers lines that have a
+  successor, so truncating or editing the tail is not detectable from the file alone.
 - **The audit chain detects tampering; it does not prevent it.** A host administrator
   (root) can rewrite the whole file and recompute the chain. Ship the log off the host
   for stronger guarantees.
@@ -76,7 +78,7 @@ path = "/var/log/operator-mcp/audit.jsonl"
 exec_enabled = false
 scratch_dir = "/var/lib/operator-mcp/scratch"
 timeout_seconds = 30       # 1 to 110
-max_output_bytes = 65536
+max_output_bytes = 65536  # 1024 to 1048576; larger results are refused and audited
 ```
 
 Required environment variables (never put these in the file):

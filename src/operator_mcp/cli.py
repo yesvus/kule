@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from .audit import verify
-from .config import ConfigError, load_config
+from .config import load_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,13 +26,17 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.cmd == "audit-verify":
-        ok, count = verify(args.path)
+        try:
+            ok, count = verify(args.path)
+        except OSError as exc:
+            print(f"audit-verify error: {exc}", file=sys.stderr)
+            return 2
         print(f"{'ok' if ok else 'BROKEN'}: {count} valid records")
         return 0 if ok else 1
 
     try:
         cfg = load_config(args.config)
-    except (ConfigError, OSError) as exc:
+    except (OSError, ValueError) as exc:  # ConfigError, TOMLDecodeError
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 

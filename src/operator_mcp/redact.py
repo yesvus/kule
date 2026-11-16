@@ -19,9 +19,12 @@ _PATTERNS = [
     re.compile(r"\bxox[abpr]-[A-Za-z0-9-]{10,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
     re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"),
+    # key=value / key: value / "key": "value", including prefixed identifiers
+    # such as DB_PASSWORD, OPENAI_API_KEY or access_token.
     re.compile(
-        r"(?i)\b(password|passwd|secret|token|api[_-]?key|client[_-]?secret)"
-        r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|\S+)"
+        r"(?i)([A-Za-z0-9_.-]{0,40}(?:password|passwd|secret|token|api[_-]?key)"
+        r"[A-Za-z0-9_.-]{0,20}[\"']?)"
+        r"(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s,;}\]]+)"
     ),
 ]
 
