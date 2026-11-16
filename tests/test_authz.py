@@ -13,6 +13,7 @@ def test_no_claims_or_sub_is_unauthenticated():
     assert P.caller_from_claims(None) is None
     assert P.caller_from_claims({}) is None
     assert P.caller_from_claims({"groups": ["ops"]}) is None
+    assert P.caller_from_claims({"sub": "", "groups": ["ops"]}) is None
     assert P.allows(None, {READ}) == (False, "unauthenticated")
 
 
@@ -62,3 +63,10 @@ def test_non_list_groups_claims_grant_nothing(raw):
 def test_policy_rejects_collapsed_exec_gate(req, exe):
     with pytest.raises(ValueError):
         Policy(required_group=req, exec_group=exe, exec_enabled=True)
+
+
+def test_policy_rejects_non_string_settings():
+    with pytest.raises(ValueError):
+        Policy(required_group=5, exec_group="x", exec_enabled=False)
+    with pytest.raises(ValueError):
+        Policy(required_group="a", exec_group="b", exec_enabled="false")

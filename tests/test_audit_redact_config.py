@@ -170,3 +170,39 @@ def test_cli_reports_errors_without_traceback(tmp_path, capsys):
     bad.write_text("not = [valid")
     assert main(["check-config", "--config", str(bad)]) == 2
     assert "config error" in capsys.readouterr().err
+
+
+def test_verify_rejects_inserted_blank_line(tmp_path: Path):
+    p = tmp_path / "a.jsonl"
+    log = AuditLog(p)
+    log.write("call", n=1)
+    log.write("call", n=2)
+    lines = p.read_text().splitlines()
+    p.write_text(lines[0] + "\n\n" + lines[1] + "\n")
+    assert verify(p) == (False, 1)
+
+
+def test_redact_authorization_any_scheme_and_secret_keys():
+    for header in ("Authorization: Basic dXNlcjpwYXNz", "authorization=Token abc123"):
+        out = redact_text(header)
+        assert "dXNlcjpwYXNz" not in out and "abc123" not in out
+    out = redact({"password=hunter2": 1})
+    assert all("hunter2" not in k for k in out)
+
+
+def test_redact_truncates_long_strings():
+    out = redact_text("a" * 100_000)
+    assert len(out) < 5000 and "truncated" in out
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "msg"),
+    [
+        ("[auth]\n", "[auth]\nrequired_group = 5\n", "string"),
+        ('public_url = "https://mcp.example.com"', "public_url = 1", "string"),
+        ("[auth]\n", '[tools]\nexec_enabled = "false"\n[auth]\n', "true or false"),
+    ],
+)
+def test_config_rejects_wrong_types(tmp_path, old, new, msg):
+    with pytest.raises(ConfigError, match=msg):
+        load_config(write(tmp_path, GOOD.replace(old, new, 1)), ENV)

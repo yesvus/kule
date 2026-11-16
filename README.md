@@ -40,6 +40,9 @@ host-changing tools yet, and the exec tier is wired but unused.
   group tiny, and treat membership as root-equivalent.
 - **OAuth is not a sandbox.** Authentication says who is calling; it does not limit
   what a permitted tool can do once it runs.
+- **Timeouts stop waiting, not work.** A tool that blocks in a worker thread keeps
+  running after its deadline; tools that run commands must enforce their own
+  subprocess timeouts and kill the process.
 - **Redaction is best-effort.** Known token shapes and `key=value` secrets are masked.
   Unusual secret formats can still reach the audit log or tool output. Tools must not
   read secrets in the first place.

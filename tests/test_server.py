@@ -132,3 +132,39 @@ async def test_output_cap_timeout_and_inner_timeout(make_cfg, claims):
     events = [(e["tool"], e["event"]) for e in audit_events(cfg) if e["event"] != "call"]
     assert events == [("big", "oversize"), ("inner_timeout", "error"), ("slow", "timeout")]
     assert verify(cfg.audit.path)[0]
+
+
+async def test_note_file_is_private(server, claims):
+    cfg, mcp = server
+    claims.value = OPERATOR
+    async with Client(mcp) as client:
+        await client.call_tool("note_write", {"name": "p", "text": "x"})
+    assert ((cfg.tools.scratch_dir / "p.txt").stat().st_mode & 0o777) == 0o600
+
+
+async def test_whoami_falls_back_to_subject(server, claims):
+    _, mcp = server
+    claims.value = {"sub": "only-sub", "groups": ["ops"]}
+    async with Client(mcp) as client:
+        who = await client.call_tool("whoami", {})
+    assert who.data["user"] == "only-sub"
+
+
+def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
+    import os
+
+    from operator_mcp import server as srv
+
+    monkeypatch.setenv("FASTMCP_HOME", "/elsewhere")
+    cfg = make_cfg()
+
+    class Stop(Exception):
+        pass
+
+    def fake_proxy(**kwargs):
+        raise Stop
+
+    monkeypatch.setattr("fastmcp.server.auth.oidc_proxy.OIDCProxy", fake_proxy)
+    with pytest.raises(Stop):
+        srv.build_auth(cfg)
+    assert os.environ["FASTMCP_HOME"] == str(cfg.server.state_dir / "fastmcp")

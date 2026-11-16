@@ -40,8 +40,12 @@ class Policy:
     groups_claim: str = "groups"
 
     def __post_init__(self) -> None:
-        if not self.required_group or not self.exec_group:
-            raise ValueError("required_group and exec_group must be non-empty")
+        for name in ("required_group", "exec_group", "groups_claim"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(self.exec_enabled, bool):
+            raise ValueError("exec_enabled must be a bool")
         if self.required_group == self.exec_group:
             raise ValueError("exec_group must differ from required_group")
 

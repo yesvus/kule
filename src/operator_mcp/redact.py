@@ -9,10 +9,15 @@ import re
 from typing import Any
 
 MASK = "[REDACTED]"
+# Strings longer than this are truncated before scanning. Bounds regex cost
+# per call and keeps oversized arguments out of the audit log.
+MAX_SCAN_CHARS = 4096
 
 _PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----", re.S),
     re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"),
+    # Any Authorization header value, whatever the scheme (Basic, Token, ...).
+    re.compile(r"(?i)(\bauthorization)(\s*[=:]\s*)([^\r\n,;}\]]+)"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}\b"),
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
@@ -32,6 +37,8 @@ _SENSITIVE_KEYS = re.compile(r"(?i)(password|passwd|secret|token|api[_-]?key|aut
 
 
 def redact_text(text: str) -> str:
+    if len(text) > MAX_SCAN_CHARS:
+        text = f"{text[:MAX_SCAN_CHARS]}...[truncated {len(text) - MAX_SCAN_CHARS} chars]"
     for pattern in _PATTERNS:
         if pattern.groups >= 3:
             text = pattern.sub(lambda m: f"{m.group(1)}{m.group(2)}{MASK}", text)
@@ -44,10 +51,15 @@ def redact(value: Any) -> Any:
     if isinstance(value, str):
         return redact_text(value)
     if isinstance(value, dict):
-        return {
-            k: (MASK if isinstance(k, str) and _SENSITIVE_KEYS.search(k) else redact(v))
-            for k, v in value.items()
-        }
+        out = {}
+        for k, v in value.items():
+            if isinstance(k, str):
+                sensitive = bool(_SENSITIVE_KEYS.search(k))
+                k = redact_text(k)
+                out[k] = MASK if sensitive else redact(v)
+            else:
+                out[k] = redact(v)
+        return out
     if isinstance(value, list | tuple):
         return [redact(v) for v in value]
     return value

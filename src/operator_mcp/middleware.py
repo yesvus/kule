@@ -44,6 +44,10 @@ class OperatorMiddleware(Middleware):
         self.max_output_bytes = max_output_bytes
         self.claims_getter = claims_getter
 
+    async def _audit(self, event: str, **fields: Any) -> None:
+        # flock + fsync block; keep them off the event loop.
+        await asyncio.to_thread(self.audit.write, event, **fields)
+
     def _caller(self) -> Caller | None:
         return self.policy.caller_from_claims(self.claims_getter())
 
@@ -73,25 +77,28 @@ class OperatorMiddleware(Middleware):
         }
 
         if self.kill_switch.exists():
-            self.audit.write("denied", reason="kill switch", args=args, **who)
+            await self._audit("denied", reason="kill switch", args=args, **who)
             raise AuthorizationError("operator-mcp is disabled by the kill switch")
 
         tool = None
         if context.fastmcp_context is not None:
             tool = await context.fastmcp_context.fastmcp.get_tool(name)
         if tool is None:
-            self.audit.write("denied", reason="unknown tool", args=args, **who)
+            await self._audit("denied", reason="unknown tool", args=args, **who)
             raise AuthorizationError(f"tool '{name}' is not available")
 
         ok, reason = self.policy.allows(caller, tool.tags)
         if not ok:
-            self.audit.write("denied", reason=reason, args=args, **who)
+            await self._audit("denied", reason=reason, args=args, **who)
             # Keep the policy detail in the audit record, not in the response.
             raise AuthorizationError("not authorized")
 
         tier = self.policy.tier_of(tool.tags)
-        self.audit.write("call", tier=tier, args=args, **who)
+        await self._audit("call", tier=tier, args=args, **who)
         start = time.monotonic()
+        # The deadline stops awaiting the tool. A synchronous tool already
+        # running in a worker thread cannot be interrupted; host tools must
+        # enforce their own subprocess timeouts (see README).
         deadline = asyncio.timeout(self.timeout_seconds)
         try:
             async with deadline:
@@ -99,23 +106,23 @@ class OperatorMiddleware(Middleware):
         except TimeoutError:
             if not deadline.expired():
                 # Raised by the tool itself, not by our deadline.
-                self.audit.write("error", duration_ms=_ms(start), error="TimeoutError", **who)
+                await self._audit("error", duration_ms=_ms(start), error="TimeoutError", **who)
                 raise
-            self.audit.write("timeout", duration_ms=_ms(start), **who)
+            await self._audit("timeout", duration_ms=_ms(start), **who)
             raise ToolError(f"tool timed out after {self.timeout_seconds:g}s") from None
         except asyncio.CancelledError:
-            self.audit.write("cancelled", duration_ms=_ms(start), **who)
+            await self._audit("cancelled", duration_ms=_ms(start), **who)
             raise
         except Exception as exc:
-            self.audit.write(
+            await self._audit(
                 "error", duration_ms=_ms(start), error=type(exc).__name__, detail=str(exc), **who
             )
             raise
         size = _result_size(result)
         if size > self.max_output_bytes:
-            self.audit.write("oversize", duration_ms=_ms(start), bytes=size, **who)
+            await self._audit("oversize", duration_ms=_ms(start), bytes=size, **who)
             raise ToolError(f"tool output exceeds {self.max_output_bytes} bytes")
-        self.audit.write("result", duration_ms=_ms(start), bytes=size, **who)
+        await self._audit("result", duration_ms=_ms(start), bytes=size, **who)
         return result
 
 

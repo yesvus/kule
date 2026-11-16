@@ -79,6 +79,18 @@ def _section(data: dict, name: str) -> dict:
     return value
 
 
+def _str(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{name} must be a string")
+    return value
+
+
+def _bool(value: object, name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be true or false (unquoted)")
+    return value
+
+
 def _string_list(value: object, name: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
         raise ConfigError(f"{name} must be an array of strings")
@@ -96,17 +108,17 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             raise ConfigError(f"auth.{secret_key} must come from the environment, not the file")
 
     server = ServerConfig(
-        host=s.get("host", "127.0.0.1"),
+        host=_str(s.get("host", "127.0.0.1"), "server.host"),
         port=int(s.get("port", 8795)),
-        public_url=s.get("public_url", "").rstrip("/"),
-        state_dir=Path(s.get("state_dir", "/var/lib/operator-mcp")),
+        public_url=_str(s.get("public_url", ""), "server.public_url").rstrip("/"),
+        state_dir=Path(_str(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir")),
     )
     auth = AuthConfig(
-        oidc_config_url=a.get("oidc_config_url", ""),
-        client_id=a.get("client_id", ""),
-        required_group=a.get("required_group", "mcp-operators"),
-        exec_group=a.get("exec_group", "mcp-exec"),
-        groups_claim=a.get("groups_claim", "groups"),
+        oidc_config_url=_str(a.get("oidc_config_url", ""), "auth.oidc_config_url"),
+        client_id=_str(a.get("client_id", ""), "auth.client_id"),
+        required_group=_str(a.get("required_group", "mcp-operators"), "auth.required_group"),
+        exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
+        groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
             "auth.allowed_client_redirect_uris",
@@ -114,10 +126,14 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         client_secret=env.get(SECRET_ENV["client_secret"], ""),
         jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
     )
-    audit = AuditConfig(path=Path(au.get("path", "/var/log/operator-mcp/audit.jsonl")))
+    audit = AuditConfig(
+        path=Path(_str(au.get("path", "/var/log/operator-mcp/audit.jsonl"), "audit.path"))
+    )
     tools = ToolsConfig(
-        exec_enabled=bool(t.get("exec_enabled", False)),
-        scratch_dir=Path(t.get("scratch_dir", "/var/lib/operator-mcp/scratch")),
+        exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
+        scratch_dir=Path(
+            _str(t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir")
+        ),
         timeout_seconds=float(t.get("timeout_seconds", 30.0)),
         max_output_bytes=int(t.get("max_output_bytes", 64 * 1024)),
     )
@@ -141,6 +157,8 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['client_secret']} is not set")
     if len(cfg.auth.jwt_signing_key) < 32:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
+    if not cfg.auth.groups_claim:
+        raise ConfigError("auth.groups_claim must not be empty")
     if not cfg.auth.required_group or not cfg.auth.exec_group:
         raise ConfigError("auth.required_group and auth.exec_group must not be empty")
     if cfg.auth.required_group == cfg.auth.exec_group:

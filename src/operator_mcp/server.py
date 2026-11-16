@@ -24,7 +24,8 @@ def build_auth(cfg: Config) -> AuthProvider:
     from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
     # Keep FastMCP's encrypted OAuth state under our state directory.
-    os.environ.setdefault("FASTMCP_HOME", str(cfg.server.state_dir / "fastmcp"))
+    # Set unconditionally: an inherited value must not redirect or share it.
+    os.environ["FASTMCP_HOME"] = str(cfg.server.state_dir / "fastmcp")
     return OIDCProxy(
         config_url=cfg.auth.oidc_config_url,
         client_id=cfg.auth.client_id,
@@ -68,5 +69,5 @@ def build_server(
         auth=auth,
         middleware=[middleware],
     )
-    basic.register(mcp, cfg, claims_getter)
+    basic.register(mcp, cfg, claims_getter, policy)
     return mcp

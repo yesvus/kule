@@ -115,7 +115,7 @@ def verify(path: Path) -> tuple[bool, int]:
         for raw in fh:
             line = raw.rstrip(b"\n")
             if not line:
-                continue
+                return False, count
             try:
                 record = json.loads(line.decode("utf-8"))
             except (UnicodeDecodeError, json.JSONDecodeError):
