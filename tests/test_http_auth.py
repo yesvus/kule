@@ -134,6 +134,9 @@ DCR_BODY = {
         "https://evil.example/cb",
         "https://chatgpt.com.evil.example/connector/oauth/x",
         "https://evil.example/?u=https://chatgpt.com/connector/oauth/x",
+        "https://claude.ai.evil.example/api/mcp/auth_callback",
+        "https://claude.ai/api/mcp/auth_callback.evil",
+        "http://claude.ai/api/mcp/auth_callback",
         "http://chatgpt.com/connector_platform_oauth_redirect",
         "https://chatgpt.com/other/path",
     ],
@@ -155,6 +158,7 @@ async def test_registration_rejects_arbitrary_redirect_uri(
     [
         "https://chatgpt.com/connector_platform_oauth_redirect",
         "https://chatgpt.com/connector/oauth/example",
+        "https://claude.ai/api/mcp/auth_callback",
     ],
 )
 async def test_registration_accepts_chatgpt_redirect_uri(
