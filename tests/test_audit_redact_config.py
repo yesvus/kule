@@ -232,6 +232,7 @@ def test_redact_masks_truncated_private_key():
     out = redact_text("prefix " + key)
     assert "QUJD" not in out
     assert MASK in out
+    assert MASK in out
 
 
 def test_redact_keeps_colliding_keys():
