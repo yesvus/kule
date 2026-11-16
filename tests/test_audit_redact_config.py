@@ -82,6 +82,25 @@ def test_config_rejects_unsafe_settings(tmp_path, extra, env, msg):
         load_config(write(tmp_path, text), env)
 
 
+def test_pod_bind_requires_explicit_opt_in(tmp_path):
+    config = GOOD.replace(
+        "[server]\\n",
+        '[server]\\nhost = "0.0.0.0"\\nallow_pod_bind = true\\n',
+    )
+    cfg = load_config(write(tmp_path, config), ENV)
+    assert cfg.server.host == "0.0.0.0"
+    assert cfg.server.allow_pod_bind is True
+
+
+def test_config_rejects_misleading_pod_opt_in(tmp_path):
+    config = GOOD.replace(
+        "[server]\\n",
+        '[server]\\nhost = "192.0.2.1"\\nallow_pod_bind = true\\n',
+    )
+    with pytest.raises(ConfigError, match="loopback"):
+        load_config(write(tmp_path, config), ENV)
+
+
 def test_config_refuses_secrets_in_file(tmp_path):
     with pytest.raises(ConfigError, match="environment"):
         load_config(write(tmp_path, GOOD + 'client_secret = "x"\n'), ENV)
