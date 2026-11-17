@@ -35,6 +35,7 @@ def test_upstream_config_is_small_read_only_and_does_not_enable_exec():
     with open(path, "rb") as source:
         config = tomllib.load(source)
     assert config["read_only"] is True
+    assert config["kubeconfig"] == "/tmp/kule-upstream-kubeconfig.json"
     assert config["toolsets"] == ["core"]
     assert config["enabled_tools"] == ["pods_list", "events_list", "pods_log"]
     assert "pods_exec" not in config["enabled_tools"]
