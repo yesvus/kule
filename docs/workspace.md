@@ -24,6 +24,8 @@ The three typed Kule tools are:
 - `workspace_read(path)`: UTF-8, maximum 8 KiB, under `/workspace`; no traversal, hidden files or symlinks.
 - `workspace_write(path,text)`: maximum 8 KiB, existing parents and atomic replacement, same path restrictions.
 
+Audit writes only bounded metadata: command UTF-8 byte count and SHA-256; file-path UTF-8 byte count and SHA-256; for file writes, text byte count and validity. **Neither raw commands nor file-write bodies are written to the audit trail.** Result payloads are bounded and redacted before return where applicable. This log discipline is independently tested in `tests/test_workspace.py`.
+
 The proxy's underlying `pods_exec` call is not exposed as a callable Kule tool. The target is fixed at `namespace=tezgah`, `container=ssh`, `name=KULE_WORKSPACE_POD`; `KULE_WORKSPACE_POD` must equal the independently approved `KULE_WORKSPACE_APPROVED_POD`. Runtime validates the exact Tezgah Deployment Pod naming format, but **the actual authorization boundary is Kubernetes RBAC**, not the regex or a path guard.
 
 Kule expects `KULE_WORKSPACE_API_URL` as a verified HTTPS Kubernetes API origin and separate projected token `/var/run/kule-workspace/token` and CA `/var/run/kule-workspace/ca.crt`, only inside the Kule Pod. The kubeconfig uses `tokenFile` and pins the `tezgah` context. This is NOT an invitation to copy credentials into Git or the developer Pod.
@@ -48,7 +50,7 @@ metadata:
 rules:
 - apiGroups: [""]
   resources: ["pods/exec"]
-  resourceNames: ["tezgah-7fd87c54-cr8dm"]
+  resourceNames: ["REPLACE_WITH_EXACT_LIVE_TEZGAH_POD_NAME"]
   verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
