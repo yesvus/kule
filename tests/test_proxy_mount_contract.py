@@ -5,6 +5,8 @@ Kule must explicitly tag only allowlisted proxy tools; everything else fails
 closed at both tools/list and tools/call. Keep this test when upgrading FastMCP.
 """
 
+import json
+
 import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -54,13 +56,15 @@ async def test_proxy_mount_only_exposes_explicit_read_allowlist(tmp_path):
         assert names == {"k8s_pods_list"}
         result = await client.call_tool("k8s_pods_list", {})
         assert result.data == "pods-read"
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError, match="not authorized"):
             await client.call_tool("k8s_pods_exec", {})
 
     holder["claims"] = {"sub": "outsider", "groups": []}
     async with Client(gateway) as client:
         assert await client.list_tools() == []
-        with pytest.raises(ToolError):
+        with pytest.raises(ToolError, match="not authorized"):
             await client.call_tool("k8s_pods_list", {})
 
-    assert verify(audit_path)[0]
+    assert verify(audit_path) == (True, 4)
+    events = [json.loads(line)["event"] for line in audit_path.read_text().splitlines()]
+    assert events == ["call", "result", "denied", "denied"]
