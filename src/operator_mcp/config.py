@@ -6,6 +6,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlsplit
 
 # ChatGPT connector redirect URIs (OpenAI Apps SDK auth docs). Only these may
 # be registered through dynamic client registration unless overridden.
@@ -24,6 +25,31 @@ SECRET_ENV = {
 
 class ConfigError(ValueError):
     pass
+
+
+def validate_k8s_api_url(raw: str) -> str | None:
+    """Return HTTPS-only API origin or None; reject empty query delimiters."""
+    if not raw:
+        return None
+    if raw != raw.strip() or "?" in raw or "#" in raw:
+        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without query or fragment")
+    base = raw.rstrip("/")
+    try:
+        parsed = urlsplit(base)
+        port = parsed.port
+    except ValueError:
+        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin") from None
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or (port is not None and not 1 <= port <= 65535)
+    ):
+        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without a path")
+    return base
 
 
 @dataclass(frozen=True)
@@ -161,6 +187,8 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
         max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),
     )
+    # check-config validates the opt-in before any server startup.
+    validate_k8s_api_url(env.get("KULE_K8S_API_URL", ""))
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)
     return cfg

@@ -1,28 +1,24 @@
-"""Bounded, read-only Kubernetes health snapshot for an explicitly configured API.
-
-No kubectl, shell, dynamic resource paths, patch/delete/watch, pod logs,
-Secrets, or credential data are exposed through this MCP tool.
-"""
+"""Bounded Kubernetes status overview; no general API proxy, shell or writes."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import ssl
 from collections import defaultdict
 from pathlib import Path
-from urllib.parse import urlsplit
-from urllib.request import HTTPSHandler, ProxyHandler, Request, build_opener
 
+import httpx2
 from fastmcp import FastMCP
 
 from ..authz import READ
+from ..config import validate_k8s_api_url
 
 _TOKEN_PATH = Path("/var/run/kule-k8s/token")
 _CA_PATH = Path("/var/run/kule-k8s/ca.crt")
 _MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 
-# Fixed collection routes. Do not add a user-supplied Kubernetes URL or path.
 _COLLECTIONS = {
     "nodes": "/api/v1/nodes?limit=500",
     "pods": "/api/v1/pods?limit=500",
@@ -31,58 +27,41 @@ _COLLECTIONS = {
 
 
 def _api_url() -> str | None:
-    base = os.environ.get("KULE_K8S_API_URL", "").rstrip("/")
-    if not base:
-        return None
-    parsed = urlsplit(base)
-    if (
-        parsed.scheme != "https"
-        or not parsed.hostname
-        or parsed.username is not None
-        or parsed.password is not None
-        or parsed.path
-        or parsed.query
-        or parsed.fragment
-    ):
-        raise ValueError("KULE_K8S_API_URL must be an HTTPS origin without a path")
-    return base
+    return validate_k8s_api_url(os.environ.get("KULE_K8S_API_URL", ""))
 
 
-def _list_items(base: str, path: str) -> list[dict]:
-    # Trust only the explicitly mounted Kubernetes CA, never -k/insecure TLS.
-    # Disable ambient HTTPS_PROXY to prevent routing a bearer token elsewhere.
-    context = ssl.create_default_context(cafile=str(_CA_PATH))
-    opener = build_opener(ProxyHandler({}), HTTPSHandler(context=context))
-    token = _TOKEN_PATH.read_text().strip()
-    if not token:
-        raise RuntimeError("Kubernetes projected token is empty")
-    # _api_url enforces HTTPS-origin-only and path comes from _COLLECTIONS.
-    request = Request(  # noqa: S310
-        base + path,
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
-        method="GET",
-    )
+async def _list_items(
+    client: httpx2.AsyncClient,
+    base: str,
+    path: str,
+    headers: dict[str, str],
+) -> list[dict]:
     try:
-        with opener.open(request, timeout=6) as response:
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
-    except Exception as exc:
-        # No Authorization header, bearer token or complete URL in audit errors.
+        # Reject all redirects before any second request could carry SA token.
+        async with client.stream("GET", base + path, headers=headers) as response:
+            if 300 <= response.status_code < 400:
+                raise RuntimeError("Kubernetes API redirect refused")
+            response.raise_for_status()
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > _MAX_RESPONSE_BYTES:
+                    raise RuntimeError("Kubernetes response too large")
+    except httpx2.HTTPError as exc:
         raise RuntimeError(f"Kubernetes status read failed ({type(exc).__name__})") from None
-    if len(raw) > _MAX_RESPONSE_BYTES:
-        raise RuntimeError("Kubernetes response too large for safe bounded overview")
     try:
-        result = json.loads(raw)
+        result = json.loads(body)
     except (ValueError, UnicodeDecodeError):
         raise RuntimeError("Kubernetes returned invalid JSON") from None
     if not isinstance(result, dict) or not isinstance(result.get("items"), list):
-        raise RuntimeError("Kubernetes returned an invalid collection")
+        raise RuntimeError("Kubernetes returned invalid collection") from None
     if result.get("metadata", {}).get("continue"):
         raise RuntimeError("Kubernetes collection is paginated; refusing partial overview")
     return result["items"]
 
 
 def summarize(nodes: list[dict], pods: list[dict], deployments: list[dict]) -> dict:
-    """Project status only; never return raw Pod specs, env, Secret refs or tokens."""
+    """Project status only; never return raw Pod specs, logs or token fields."""
     node_status = []
     for node in nodes:
         status = node.get("status", {})
@@ -148,21 +127,31 @@ def summarize(nodes: list[dict], pods: list[dict], deployments: list[dict]) -> d
     }
 
 
-def register(mcp: FastMCP) -> None:
+def register(mcp: FastMCP, *, timeout_seconds: float) -> None:
     base_url = _api_url()
     if base_url is None:
-        # Feature off by default; not advertised to users until source-controlled
-        # projected credentials + least-privilege RBAC + egress are deployed.
         return
 
     @mcp.tool(tags={READ}, annotations={"readOnlyHint": True, "openWorldHint": False})
-    def k8s_overview() -> dict:
-        """Summarize cluster node readiness, per-namespace Pod counts, and unhealthy Deployments.
+    async def k8s_overview() -> dict:
+        """Summarize Node readiness, namespace Pod counts and unavailable Deployments.
 
-        Read-only. Never returns Pod specs, secrets, logs or shell access.
+        No Secret, raw Pod spec, arbitrary API call, shell or write access.
         """
-        return summarize(
-            _list_items(base_url, _COLLECTIONS["nodes"]),
-            _list_items(base_url, _COLLECTIONS["pods"]),
-            _list_items(base_url, _COLLECTIONS["deployments"]),
-        )
+        token = _TOKEN_PATH.read_text().strip()
+        if not token:
+            raise RuntimeError("Kubernetes projected token is empty")
+        context = ssl.create_default_context(cafile=str(_CA_PATH))
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        budget = max(0.1, min(8.0, timeout_seconds * 0.8))
+        async with asyncio.timeout(budget):
+            async with httpx2.AsyncClient(
+                verify=context, timeout=5.0, trust_env=False, follow_redirects=False
+            ) as client:
+                responses = await asyncio.gather(
+                    *(
+                        _list_items(client, base_url, path, headers)
+                        for path in _COLLECTIONS.values()
+                    )
+                )
+        return summarize(*responses)

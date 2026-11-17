@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import httpx2
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
@@ -102,6 +105,8 @@ def test_summary_has_no_secrets_specs_or_logs():
         "https://localhost:6443/api",
         "https://localhost:6443?watch=true",
         "https://localhost:6443/#fragment",
+        "https://localhost:6443?",
+        "https://localhost:6443#",
     ],
 )
 def test_explicit_api_url_is_restricted(monkeypatch, url):
@@ -110,23 +115,30 @@ def test_explicit_api_url_is_restricted(monkeypatch, url):
         kubernetes._api_url()
 
 
-def test_no_api_configuration_means_no_k8s_tools(make_cfg, claims, monkeypatch):
+async def test_no_api_configuration_means_no_k8s_tools(make_cfg, claims, monkeypatch):
     monkeypatch.delenv("KULE_K8S_API_URL", raising=False)
     mcp = build_server(make_cfg(), claims_getter=claims)
-    assert mcp is not None
+    claims.value = OPERATOR
+    async with Client(mcp) as client:
+        assert "k8s_overview" not in {t.name for t in await client.list_tools()}
 
 
 async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypatch):
     monkeypatch.setenv("KULE_K8S_API_URL", "https://10.0.1.248:6443")
     requests = []
 
-    def fake_api_get(base: str, path: str) -> list[dict]:
+    async def fake_api_get(client, base: str, path: str, headers: dict) -> list[dict]:
         assert base == "https://10.0.1.248:6443"
         assert path in kubernetes._COLLECTIONS.values()
+        assert headers["Authorization"] == "Bearer synthetic-test-token"
         requests.append(path)
         return _fixture_data(path)
 
     monkeypatch.setattr(kubernetes, "_list_items", fake_api_get)
+    monkeypatch.setattr(
+        kubernetes, "_TOKEN_PATH", SimpleNamespace(read_text=lambda: "synthetic-test-token")
+    )
+    monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda **kwargs: True)
     cfg = make_cfg()
     mcp = build_server(cfg, claims_getter=claims)
     claims.value = OPERATOR
@@ -136,6 +148,7 @@ async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypat
         assert tools["k8s_overview"].annotations.read_only_hint
         result = await client.call_tool("k8s_overview", {})
         assert result.data["pod_total"] == 2
+        assert "super-secret-canary" not in str(result.data)
         assert len(requests) == 3
     claims.value = OUTSIDER
     async with Client(mcp) as client:
@@ -145,3 +158,24 @@ async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypat
     assert not requests[3:]
     assert cfg.audit.path.exists()
     assert "k8s_overview" in cfg.audit.path.read_text()
+
+
+async def test_redirect_denied_without_following_second_origin():
+    visited = []
+
+    def handler(request):
+        visited.append(request.url.host)
+        return httpx2.Response(302, headers={"Location": "https://attacker.invalid/token"})
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler),
+        follow_redirects=False,
+    ) as client:
+        with pytest.raises(RuntimeError, match="redirect refused"):
+            await kubernetes._list_items(
+                client,
+                "https://10.0.1.248:6443",
+                "/api/v1/nodes?limit=500",
+                {"Authorization": "Bearer synthetic-test-token"},
+            )
+    assert visited == ["10.0.1.248"]

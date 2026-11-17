@@ -70,5 +70,5 @@ def build_server(
         middleware=[middleware],
     )
     basic.register(mcp, cfg, claims_getter, policy)
-    kubernetes.register(mcp)
+    kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
     return mcp
