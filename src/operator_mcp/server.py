@@ -13,7 +13,7 @@ from .audit import AuditLog
 from .authz import Policy
 from .config import Config
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
-from .tools import basic, kubernetes, upstream_kubernetes
+from .tools import basic, kubernetes, upstream_kubernetes, workspace
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -68,6 +68,8 @@ def build_server(
         exec_group=cfg.auth.exec_group,
         exec_enabled=cfg.tools.exec_enabled,
         groups_claim=cfg.auth.groups_claim,
+        workspace_group=cfg.auth.workspace_group,
+        workspace_enabled=cfg.tools.workspace_enabled,
     )
     audit = AuditLog(cfg.audit.path)
     middleware = OperatorMiddleware(
@@ -85,6 +87,7 @@ def build_server(
         middleware=[middleware],
     )
     basic.register(mcp, cfg, claims_getter, policy)
+    workspace.register(mcp, cfg)
     kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
     if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
         upstream_kubernetes.mount(mcp)
