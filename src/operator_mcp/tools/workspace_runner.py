@@ -84,7 +84,10 @@ def _write(path: str, text: str) -> dict:
             mode = None
         if mode is not None and not stat.S_ISREG(mode):
             raise ValueError("destination must be a regular file")
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        fd = os.open(
+            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600, dir_fd=directory,
+        )
         try:
             with os.fdopen(fd, "wb", closefd=True) as stream:
                 stream.write(data)
@@ -113,7 +116,7 @@ def _kill(proc: subprocess.Popen[bytes]) -> None:
 def _exec(command: str) -> dict:
     if not command.strip() or len(command.encode()) > 4096 or "\x00" in command:
         raise ValueError("command must be 1..4096 bytes")
-    proc = subprocess.Popen(
+    proc = subprocess.Popen(  # noqa: S603 (intentional in-container dev-user exec)
         ["/bin/sh", "-c", command], cwd=ROOT, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
         close_fds=True,
