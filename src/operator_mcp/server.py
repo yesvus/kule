@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
+from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from .audit import AuditLog
 from .authz import Policy
@@ -20,13 +22,30 @@ INSTRUCTIONS = (
 )
 
 
-def build_auth(cfg: Config) -> AuthProvider:
-    from fastmcp.server.auth.oidc_proxy import OIDCProxy
+class AuthentikRefreshOIDCProxy(OIDCProxy):
+    """Preserve requested scopes while asking Authentik for a refresh token.
 
+    FastMCP 4.2.0 forwards the client's scopes verbatim. ChatGPT currently
+    requests only openid/profile, but Authentik requires offline_access for
+    refresh token issuance. Add it upstream without dropping optional client
+    scopes, and keep Kule's own group/tool authorization unchanged.
+    """
+
+    def _build_upstream_authorize_url(
+        self, txn_id: str, transaction: dict[str, Any]
+    ) -> str:
+        requested = transaction.get("scopes") or self.required_scopes or []
+        scopes = list(dict.fromkeys([*requested, "offline_access"]))
+        return super()._build_upstream_authorize_url(
+            txn_id, {**transaction, "scopes": scopes}
+        )
+
+
+def build_auth(cfg: Config) -> AuthProvider:
     # Keep FastMCP's encrypted OAuth state under our state directory.
     # Set unconditionally: an inherited value must not redirect or share it.
     os.environ["FASTMCP_HOME"] = str(cfg.server.state_dir / "fastmcp")
-    return OIDCProxy(
+    return AuthentikRefreshOIDCProxy(
         config_url=cfg.auth.oidc_config_url,
         client_id=cfg.auth.client_id,
         client_secret=cfg.auth.client_secret,
@@ -36,11 +55,6 @@ def build_auth(cfg: Config) -> AuthProvider:
         # `profile` carries the groups claim in authentik's default mappings.
         required_scopes=["openid", "profile"],
         valid_scopes=["openid", "profile", "email", "offline_access"],
-        # Authentik issues refresh tokens only when its own upstream request includes
-        # offline_access. ChatGPT DCR requests only openid/profile; without this
-        # upstream-only scope, FastMCP cannot issue a client refresh token.
-        # Keep client authorization tiers and group requirements unchanged.
-        extra_authorize_params={"scope": "openid profile offline_access"},
         jwt_signing_key=cfg.auth.jwt_signing_key,
         allowed_client_redirect_uris=cfg.auth.allowed_client_redirect_uris,
         require_authorization_consent=True,
