@@ -299,7 +299,7 @@ async def test_developer_group_lists_only_workspace_and_call_time_denies_operato
     assert calls == [(POD, "read")]
     assert not (cfg.tools.scratch_dir / "denied.txt").exists()
     audit = cfg.audit.path.read_text()
-    assert "denied" in audit
+    assert [json.loads(line)["event"] for line in audit.splitlines()].count("denied") == 4
     assert "mcp-developers" not in audit
     assert "synthetic-workspace-identity" not in audit
 
