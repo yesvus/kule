@@ -1,6 +1,8 @@
 # Source-only, opt-in upstream integration: disabled by default in Kule.
 # Upstream: github.com/containers/kubernetes-mcp-server
 log_file = "stderr"
+# Pin the projected-token kubeconfig; otherwise a Pod may auto-select in-cluster auth.
+kubeconfig = "/tmp/kule-upstream-kubeconfig.json"
 read_only = true
 list_output = "table"
 toolsets = ["core"]
