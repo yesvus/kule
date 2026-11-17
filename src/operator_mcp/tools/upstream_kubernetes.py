@@ -55,12 +55,13 @@ def _write_kubeconfig() -> Path:
 def mount(mcp: FastMCP, *, synthetic_backend: FastMCP | None = None) -> None:
     """Mount only reviewed tools; synthetic_backend is for isolated tests."""
     if synthetic_backend is None:
-        kubeconfig = _write_kubeconfig()
+        _write_kubeconfig()
         target = StdioTransport(
             command=_BINARY,
             args=["--config", _CONFIG],
-            # No OAuth client secret / signing key forwarded to the Go backend.
-            env={"KUBECONFIG": str(kubeconfig), "HOME": str(_KUBECONFIG.parent)},
+            # The upstream TOML explicitly pins this file; never auto-select
+            # in-cluster auth. Do not forward Kule's Authentik secrets.
+            env={"HOME": str(_KUBECONFIG.parent)},
         )
     else:
         target = synthetic_backend
