@@ -8,10 +8,14 @@ It does not replace existing break-glass or remote management tools.
 
 ## Status
 
-**P1 spike. Not production.** The only tools today are `whoami` (read) and
-`note_write` (writes a note into a scratch directory). They exist to prove the
-authentication, authorization and audit paths end to end. There are no shell or
-host-changing tools yet, and the exec tier is wired but unused.
+**Current live pilot**: `whoami` (read) and `note_write` (scratch-only write)
+are authenticated through ChatGPT's OAuth connection. The optional
+`k8s_overview` tool in this PR is **source-only** until the companion
+`yesvus/ops` RBAC/network/token projection and a reviewed image digest are
+explicitly deployed. It summarizes Node readiness, per-namespace Pod counts,
+and unavailable Deployments without revealing raw Pod specifications, Secrets,
+logs, service-account tokens or allowing host shell / Kubernetes writes.
+The exec tier remains disabled.
 
 ## Architecture
 
@@ -152,3 +156,34 @@ MFA fresh-login gate (#803), verified image digest and protected-route review pa
   evidence until exported to the logging pipeline.
 - No developer-agent credentials, Docker socket, host paths, kubeconfig,
   service-account token or host-operation tools are part of this pilot.
+
+## Optional Kubernetes read-only overview (NOT LIVE until separate GitOps rollout)
+
+`k8s_overview` is registered **only** when the operator explicitly supplies
+`KULE_K8S_API_URL` (for the current Gurbet pilot:
+`https://10.0.1.248:6443`). The public OAuth server cannot choose an
+arbitrary Kubernetes API path or HTTP method. The fixed internal API requests
+list Nodes, Pods and Deployments; results are projected to aggregate status
+fields only and refuse a paginated or oversized list rather than silently
+claiming a partial healthy cluster.
+
+To run safely, GitOps must mount a short-lived, projected Kubernetes
+ServiceAccount token and the cluster CA at `/var/run/kule-k8s/token` and
+`/var/run/kule-k8s/ca.crt`. The ServiceAccount must retain
+`automountServiceAccountToken: false`. Its dedicated ClusterRole grants
+**only** `list` for core `nodes` / `pods` and apps `deployments`.
+No `get secrets`, `pods/log`, `pods/exec`, mutating verbs or
+`cluster-admin`. NetworkPolicy allows exactly
+`10.0.1.248/32:6443`; the CA verifies the actual Kubernetes API
+certificate (whose SAN includes the OCI private IP). The tested k3s Service
+VIP `10.43.0.1:443` does **not** work with a Pod-scoped /32 egress rule due
+to this cluster's current CNI/NAT path; an isolated 5m CPU/24Mi test Pod
+confirmed the fixed private endpoint returns HTTP 401 *without* credentials.
+That test Pod and its temporary NetworkPolicy were removed.
+
+Enabling this source alone does **not** restart the running MCP Pod, update
+its publicly available tools, change RBAC, or authorize a rollout.
+The independent GitOps PR must pass exact-head review, RBAC
+`kubectl auth can-i` negatives and the live disposable token read
+before replacing the existing digest. SentinelX remains available for
+break-glass until the Kule operator functionality is independently tested.
