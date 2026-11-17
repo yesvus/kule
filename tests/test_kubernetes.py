@@ -125,6 +125,7 @@ async def test_no_api_configuration_means_no_k8s_tools(make_cfg, claims, monkeyp
 
 async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypatch):
     monkeypatch.setenv("KULE_K8S_API_URL", "https://10.0.1.248:6443")
+    monkeypatch.delenv("KULE_K8S_LOG_NAMESPACES", raising=False)
     requests = []
 
     async def fake_api_get(client, base: str, path: str, headers: dict) -> list[dict]:
@@ -144,7 +145,14 @@ async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypat
     claims.value = OPERATOR
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-        assert set(tools) == {"whoami", "note_write", "k8s_overview", "k8s_pods", "k8s_deployments", "k8s_events"}
+        assert set(tools) == {
+            "whoami",
+            "note_write",
+            "k8s_overview",
+            "k8s_pods",
+            "k8s_deployments",
+            "k8s_events",
+        }
         assert tools["k8s_overview"].annotations.read_only_hint
         result = await client.call_tool("k8s_overview", {})
         assert result.data["pod_total"] == 2
