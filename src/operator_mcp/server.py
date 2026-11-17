@@ -13,7 +13,7 @@ from .audit import AuditLog
 from .authz import Policy
 from .config import Config
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
-from .tools import basic, kubernetes
+from .tools import basic, kubernetes, upstream_kubernetes
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -86,4 +86,6 @@ def build_server(
     )
     basic.register(mcp, cfg, claims_getter, policy)
     kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+    if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
+        upstream_kubernetes.mount(mcp)
     return mcp
