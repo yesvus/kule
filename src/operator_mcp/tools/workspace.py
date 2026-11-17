@@ -22,7 +22,7 @@ from . import workspace_runner
 
 _TOKEN = Path("/var/run/kule-workspace/token")
 _CA = Path("/var/run/kule-workspace/ca.crt")
-_CONFIG = Path("/tmp/kule-workspace-kubeconfig.json")
+_CONFIG = Path("/tmp/kule-workspace-kubeconfig.json")  # noqa: S108 (O_NOFOLLOW, 0600)
 _BACKEND_CONFIG = "/usr/local/share/kule/kubernetes-workspace.toml"
 _BINARY = "/usr/local/bin/kubernetes-mcp-server"
 _POD_PATTERN = re.compile(r"coder-[a-z0-9-]+-[a-z0-9]{5}")
@@ -33,7 +33,9 @@ def _target() -> tuple[str, str]:
     api_url = validate_k8s_api_url(os.environ.get("KULE_WORKSPACE_API_URL", ""))
     pod = os.environ.get("KULE_WORKSPACE_POD", "")
     if not api_url or not _POD_PATTERN.fullmatch(pod):
-        raise RuntimeError("workspace requires an explicit Kubernetes API origin and pinned Coder Pod")
+        raise RuntimeError(
+            "workspace requires an explicit Kubernetes API origin and pinned Coder Pod"
+        )
     if not _TOKEN.is_file() or not _CA.is_file():
         raise RuntimeError("workspace-only projected ServiceAccount identity is not mounted")
     return api_url, pod
