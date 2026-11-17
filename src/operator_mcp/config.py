@@ -200,8 +200,6 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     workspace_api = validate_k8s_api_url(
         env.get("KULE_WORKSPACE_API_URL", ""), "KULE_WORKSPACE_API_URL"
     )
-    if tools.developer_enabled and not tools.workspace_enabled:
-        raise ConfigError("developer_enabled requires workspace_enabled")
     if tools.workspace_enabled:
         if not workspace_api:
             raise ConfigError("KULE_WORKSPACE_API_URL is required when workspace_enabled is true")
@@ -215,6 +213,8 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 
 
 def validate(cfg: Config) -> None:
+    if cfg.tools.developer_enabled and not cfg.tools.workspace_enabled:
+        raise ConfigError("developer_enabled requires workspace_enabled")
     if not 1 <= cfg.server.port <= 65535:
         raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
