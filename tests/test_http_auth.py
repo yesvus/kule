@@ -180,10 +180,18 @@ async def test_garbage_bearer_token_is_rejected(
     assert resp.status_code == 401
 
 
-def test_oidc_upstream_requests_refresh_scope_without_client_offline_access(
-    make_cfg, oidc_discovery_url
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (["openid", "profile"], "openid profile offline_access"),
+        (["openid", "profile", "email"], "openid profile email offline_access"),
+        (["openid", "profile", "offline_access"], "openid profile offline_access"),
+    ],
+)
+def test_upstream_refresh_scope_preserves_client_scopes(
+    make_cfg, oidc_discovery_url, requested, expected
 ):
-    """ChatGPT openid/profile requests must obtain upstream refresh capability."""
+    """Only add offline_access upstream; retain all client-requested scopes."""
     from urllib.parse import parse_qs, urlsplit
 
     cfg = make_cfg()
@@ -191,10 +199,10 @@ def test_oidc_upstream_requests_refresh_scope_without_client_offline_access(
     proxy = build_auth(cfg)
     # Only the local synthetic IdP is contacted. No real login or bearer.
     url = proxy._build_upstream_authorize_url(
-        "synthetic-transaction", {"scopes": ["openid", "profile"]}
+        "synthetic-transaction", {"scopes": requested}
     )
     params = parse_qs(urlsplit(url).query)
-    assert params["scope"] == ["openid profile offline_access"]
+    assert params["scope"] == [expected]
     assert params["response_type"] == ["code"]
     assert params["redirect_uri"] == [f"{PUBLIC_URL}/auth/callback"]
     assert proxy.required_scopes == ["openid", "profile"]
