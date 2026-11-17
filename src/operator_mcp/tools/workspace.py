@@ -1,6 +1,6 @@
 """Tezgah-only file/process tools over the maintained Kubernetes MCP backend.
 
-The Pod name is pinned at deployment time. There is no arbitrary Kubernetes
+The standalone Karga Tezgah Pod is pinned at deployment time. There is no arbitrary Kubernetes
 target, API path, host shell, node SSH, or inherited operator observer token.
 """
 
@@ -26,7 +26,9 @@ _CA = Path("/var/run/kule-workspace/ca.crt")
 _CONFIG = Path("/tmp/kule-workspace-kubeconfig.json")  # noqa: S108 (O_NOFOLLOW, 0600)
 _BACKEND_CONFIG = "/usr/local/share/kule/kubernetes-workspace.toml"
 _BINARY = "/usr/local/bin/kubernetes-mcp-server"
-_POD_PATTERN = re.compile(r"coder-[a-z0-9-]+-[a-z0-9]{5}")
+_POD_PATTERN = re.compile(r"tezgah-[a-z0-9]+-[a-z0-9]{5}")
+_NAMESPACE = "tezgah"
+_CONTAINER = "ssh"
 _MARKER = workspace_runner.MARKER
 
 
@@ -38,7 +40,7 @@ def _target() -> tuple[str, str]:
     approved = os.environ.get("KULE_WORKSPACE_APPROVED_POD", "")
     if not api_url or not _POD_PATTERN.fullmatch(pod) or pod != approved:
         raise RuntimeError(
-            "workspace requires an explicit Kubernetes API origin and approved exact Coder Pod"
+            "workspace requires an explicit Kubernetes API origin and approved exact Tezgah Pod"
         )
     if not _TOKEN.is_file() or not _CA.is_file():
         raise RuntimeError("workspace-only projected ServiceAccount identity is not mounted")
@@ -56,7 +58,7 @@ def _write_kubeconfig(api_url: str) -> None:
         "contexts": [
             {
                 "name": "workspace",
-                "context": {"cluster": "workspace", "user": "workspace", "namespace": "coder"},
+                "context": {"cluster": "workspace", "user": "workspace", "namespace": _NAMESPACE},
             }
         ],
         "current-context": "workspace",
@@ -73,8 +75,8 @@ async def _invoke(pod: str, operation: str, payload: dict, timeout: float) -> di
     # exec operation invokes a shell *inside the selected dev container*.
     arguments = {
         "name": pod,
-        "namespace": "coder",
-        "container": "dev",
+        "namespace": _NAMESPACE,
+        "container": _CONTAINER,
         "command": ["python3", "-c", Path(workspace_runner.__file__).read_text(), operation, data],
     }
     transport = StdioTransport(
