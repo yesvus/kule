@@ -71,7 +71,5 @@ def mount(mcp: FastMCP, *, synthetic_backend: FastMCP | None = None) -> None:
     proxy.disable(components={"resource", "template", "prompt"})
     mcp.mount(proxy, namespace="k8s")
     mcp.add_transform(
-        ToolTransform(
-            {f"k8s_{name}": ToolTransformConfig(tags={"read"}) for name in _READ_TOOLS}
-        )
+        ToolTransform({f"k8s_{name}": ToolTransformConfig(tags={"read"}) for name in _READ_TOOLS})
     )
