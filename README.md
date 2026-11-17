@@ -131,24 +131,38 @@ provider on loopback, so it needs no network access.
 
 Apache License 2.0. See [LICENSE](LICENSE).
 
-## k3s dual-client pilot (ops #461)
+## Deployment notes
 
-The deployment definitions and approval gates live in [yesvus/ops](https://github.com/yesvus/ops) under
-`cluster/operator-mcp-pilot/`. The client URL will be
-`https://mcp.yesvus.com/mcp`; do not expose this endpoint until the Authentik
-MFA fresh-login gate (#803), verified image digest and protected-route review pass.
+Guidance for exposing the server to hosted MCP clients such as ChatGPT and Claude.ai.
+Deployment manifests, approval gates and hostnames belong in your own infrastructure
+repository, not here.
 
-- ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check
-  the exact callback selected by the ChatGPT plugin builder; write-tool support
-  must be proven on the **actual account**.
-- Claude.ai: prefer its published client identity when compatible; otherwise
-  choose automatic registration, with an exact fallback callback
-  `https://claude.ai/api/mcp/auth_callback`. Never permit a wildcard Claude domain.
-- The FastMCP OAuth storage backend must be explicitly verified on Linux.
-  A data directory alone does **not** prove that DCR registrations survive
-  process restarts. Reconnect/re-register and token lifecycle are acceptance tests.
-- Scratch notes, audit records and the kill switch use an isolated volume.
-  Audits redact secrets best-effort; they must not be treated as durable external
-  evidence until exported to the logging pipeline.
-- No developer-agent credentials, Docker socket, host paths, kubeconfig,
-  service-account token or host-operation tools are part of this pilot.
+**Before exposing the endpoint**
+
+- Require a fresh, MFA-backed login at your identity provider.
+- Deploy a verified image, pinned by digest.
+- Review the route that publishes the endpoint, and keep it unpublished until that passes.
+
+**Client registration**
+
+- ChatGPT: dynamic client registration with only the documented redirect URI patterns.
+  Check the exact callback the ChatGPT plugin builder selects, and confirm write-tool
+  support on the account you will actually use.
+- Claude.ai: prefer its published client identity when compatible. Otherwise use
+  automatic registration with the exact callback
+  `https://claude.ai/api/mcp/auth_callback`. Never allow a wildcard Claude domain.
+
+**State and persistence**
+
+- Verify the FastMCP OAuth storage backend on your target platform. A data directory
+  alone does not prove that dynamic registrations survive a process restart. Test
+  reconnect/re-registration and the token lifecycle as acceptance criteria.
+- Keep scratch notes, audit records and the kill switch on an isolated volume.
+- Audit redaction is best-effort. Export audit records to a logging pipeline before
+  treating them as durable evidence.
+
+**Out of scope**
+
+The server is designed to run without developer-agent credentials, a container runtime
+socket, host paths, kubeconfig, service-account tokens or host-operation tools. Do not
+mount or grant any of these.
