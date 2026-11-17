@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import ssl
@@ -20,11 +21,22 @@ from .kubernetes import _CA_PATH, _TOKEN_PATH, _api_url, _list_items
 # Kubernetes DNS-label names only. Reject slash, query, percent and escapes.
 _NAME = re.compile(r"[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?\Z")
 _LOG_MAX_BYTES = 4096
+_LOG_FETCH_MAX_BYTES = 65536
+_EVENT_PAGE_BYTES = 1024 * 1024
 
 
 def _name(value: str, label: str) -> str:
     if not isinstance(value, str) or not _NAME.fullmatch(value):
         raise ValueError(f"{label} must be a Kubernetes DNS-label name (1-63 chars)")
+    return value
+
+
+def _pod_name(value: str) -> str:
+    """Allow Kubernetes Pod DNS subdomains, including dotted names."""
+    if not isinstance(value, str) or not value or len(value) > 253:
+        raise ValueError("pod must be a DNS-subdomain name (1-253 chars)")
+    if not all(_NAME.fullmatch(part) for part in value.split(".")):
+        raise ValueError("pod must be a DNS-subdomain name (1-253 chars)")
     return value
 
 
@@ -56,6 +68,47 @@ async def _collection(base: str, path: str, timeout_seconds: float) -> list[dict
             return await _list_items(client, base, path, _headers())
 
 
+async def _events_collection(
+    base: str, namespace: str, timeout_seconds: float
+) -> tuple[list[dict], bool]:
+    """Follow at most three 200-item Event pages; mark incomplete results."""
+    items: list[dict] = []
+    continuation = ""
+    async with asyncio.timeout(min(8.0, timeout_seconds * 0.8)):
+        async with _client() as client:
+            headers = _headers()
+            for _ in range(3):
+                params = {"limit": "200"}
+                if continuation:
+                    params["continue"] = continuation
+                path = f"/api/v1/namespaces/{namespace}/events?" + urlencode(params)
+                try:
+                    async with client.stream("GET", base + path, headers=headers) as response:
+                        if 300 <= response.status_code < 400:
+                            raise RuntimeError("Kubernetes API redirect refused")
+                        response.raise_for_status()
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > _EVENT_PAGE_BYTES:
+                                raise RuntimeError("Kubernetes Events page too large")
+                except httpx2.HTTPError as exc:
+                    raise RuntimeError(
+                        f"Kubernetes Events read failed ({type(exc).__name__})"
+                    ) from None
+                try:
+                    parsed = json.loads(body)
+                except (ValueError, UnicodeDecodeError):
+                    raise RuntimeError("Kubernetes Events response is not JSON") from None
+                if not isinstance(parsed, dict) or not isinstance(parsed.get("items"), list):
+                    raise RuntimeError("Invalid Kubernetes Events collection")
+                items.extend(parsed["items"])
+                continuation = parsed.get("metadata", {}).get("continue", "")
+                if not continuation:
+                    return items, False
+    return items, True
+
+
 async def _log_text(
     client: httpx2.AsyncClient, base: str, path: str, headers: dict[str, str]
 ) -> str:
@@ -67,12 +120,26 @@ async def _log_text(
             body = bytearray()
             async for chunk in response.aiter_bytes():
                 body.extend(chunk)
-                if len(body) > _LOG_MAX_BYTES:
+                if len(body) > _LOG_FETCH_MAX_BYTES:
                     raise RuntimeError("Kubernetes logs exceed bounded response")
     except httpx2.HTTPError as exc:
-        # Never propagate response contents, token or URL.
         raise RuntimeError(f"Kubernetes log read failed ({type(exc).__name__})") from None
-    return redact_text(body.decode("utf-8", errors="replace"))
+
+    # Complete-line redaction precedes dropping older lines so that
+    # a truncated token can never escape only due to the output cap.
+    lines = body.decode("utf-8", errors="replace").splitlines()
+    clean = [
+        "[overlong log line omitted]" if len(line) > 4000 else redact_text(line)
+        for line in lines
+    ]
+    omitted = False
+    while clean and len("\n".join(clean).encode()) > _LOG_MAX_BYTES - 48:
+        clean.pop(0)
+        omitted = True
+    result = "\n".join(clean)
+    if omitted:
+        result = "[older log lines omitted due to size limit]\n" + result
+    return result
 
 
 def _pod_summary(pod: dict) -> dict:
@@ -124,7 +191,7 @@ def _event_summary(event: dict) -> dict:
             or event.get("eventTime")
             or event.get("metadata", {}).get("creationTimestamp", "")
         ),
-        "message": redact_text(event.get("message", "")[:350]),
+        "message": redact_text(event.get("message", ""))[:350],
     }
 
 
@@ -171,9 +238,7 @@ def register(mcp: FastMCP, *, timeout_seconds: float) -> None:
     ) -> dict:
         """Show recent Kubernetes Events (types, reasons, bounded redacted messages)."""
         ns = _name(namespace, "namespace")
-        items = await _collection(
-            base, f"/api/v1/namespaces/{ns}/events?limit=500", timeout_seconds
-        )
+        items, incomplete = await _events_collection(base, ns, timeout_seconds)
         result = sorted(
             (_event_summary(e) for e in items),
             key=lambda e: e["last_seen"],
@@ -183,7 +248,7 @@ def register(mcp: FastMCP, *, timeout_seconds: float) -> None:
             "namespace": ns,
             "total": len(items),
             "events": result[:40],
-            "truncated": len(items) > 40,
+            "truncated": len(items) > 40 or incomplete,
         }
 
     if not allowed_logs:
@@ -203,14 +268,13 @@ def register(mcp: FastMCP, *, timeout_seconds: float) -> None:
         ns = _name(namespace, "namespace")
         if ns not in allowed_logs:
             raise ValueError("Kubernetes Pod log reads not enabled in this namespace")
-        pod = _name(pod, "pod")
+        pod = _pod_name(pod)
         if container is not None:
             container = _name(container, "container")
         if not 1 <= tail_lines <= 50:
             raise ValueError("tail_lines must be between 1 and 50")
         params = {
             "tailLines": str(tail_lines),
-            "limitBytes": str(_LOG_MAX_BYTES),
             "timestamps": "true",
         }
         if container:
