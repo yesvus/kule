@@ -47,16 +47,21 @@ class Policy:
 
     def __post_init__(self) -> None:
         for name in (
-            "required_group", "exec_group", "workspace_group", "developer_group", "groups_claim"
+            "required_group",
+            "exec_group",
+            "workspace_group",
+            "developer_group",
+            "groups_claim",
         ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
         if not isinstance(self.exec_enabled, bool):
             raise ValueError("exec_enabled must be a bool")
-        if len({
-            self.required_group, self.exec_group, self.workspace_group, self.developer_group
-        }) != 4:
+        if (
+            len({self.required_group, self.exec_group, self.workspace_group, self.developer_group})
+            != 4
+        ):
             raise ValueError("required, exec and workspace groups must differ")
         if not isinstance(self.workspace_enabled, bool):
             raise ValueError("workspace_enabled must be a bool")
