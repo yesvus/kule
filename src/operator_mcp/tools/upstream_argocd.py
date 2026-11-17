@@ -75,7 +75,7 @@ def _check_registry(path: Path, expected_url: str) -> None:
             or not entry["token"].strip()
         ):
             raise ValueError("unapproved Argo instance or empty token")
-    except (OSError, ValueError, TypeError, UnicodeError) as exc:
+    except (OSError, ValueError, TypeError, UnicodeError):
         raise RuntimeError("Kule Argo CD token registry is missing or invalid") from None
 
 
