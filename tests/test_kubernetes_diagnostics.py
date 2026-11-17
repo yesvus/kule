@@ -107,9 +107,7 @@ async def test_allowed_operator_sees_tools_and_namespaced_paths(make_cfg, claims
     monkeypatch.setattr(
         d,
         "_client",
-        lambda: httpx2.AsyncClient(
-            transport=httpx2.MockTransport(log_handler)
-        ),
+        lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(log_handler)),
     )
     cfg = make_cfg()
     mcp = build_server(cfg, claims_getter=claims)
@@ -178,7 +176,6 @@ async def test_log_redirect_denied_before_follow():
     assert visited == ["10.0.1.248"]
 
 
-
 def test_pod_names_accept_dns_subdomains_but_reject_injection():
     assert d._pod_name("a." + "b" * 63 + ".c") == "a." + "b" * 63 + ".c"
     for bad in ("../x", "foo/bar", "a?watch=true", "bad%2fname", "x" * 254, ""):
@@ -230,7 +227,9 @@ async def test_real_log_stream_refuses_oversize_body():
     ) as client:
         with pytest.raises(RuntimeError, match="bounded"):
             await d._log_text(
-                client, "https://10.0.1.248:6443", "/api/v1/namespaces/birted-staging/pods/web/log",
+                client,
+                "https://10.0.1.248:6443",
+                "/api/v1/namespaces/birted-staging/pods/web/log",
                 {"Authorization": "Bearer synthetic"},
             )
 
@@ -248,17 +247,22 @@ async def test_event_pages_continue_bounded(monkeypatch):
         }
         return httpx2.Response(
             200,
-            json={"items": [{"reason": "Test", "metadata": {"name": token or "first"}}],
-                  "metadata": {"continue": value.get(token or "", "")}},
+            json={
+                "items": [{"reason": "Test", "metadata": {"name": token or "first"}}],
+                "metadata": {"continue": value.get(token or "", "")},
+            },
         )
 
     monkeypatch.setattr(d, "_headers", lambda: {"Authorization": "Bearer synthetic"})
     monkeypatch.setattr(
-        d, "_client",
+        d,
+        "_client",
         lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler), follow_redirects=False),
     )
     events, truncated = await d._events_collection(
-        "https://10.0.1.248:6443", "birted-staging", 30,
+        "https://10.0.1.248:6443",
+        "birted-staging",
+        30,
     )
     assert len(events) == 3
     assert truncated is True

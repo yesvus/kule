@@ -129,8 +129,7 @@ async def _log_text(
     # a truncated token can never escape only due to the output cap.
     lines = body.decode("utf-8", errors="replace").splitlines()
     clean = [
-        "[overlong log line omitted]" if len(line) > 4000 else redact_text(line)
-        for line in lines
+        "[overlong log line omitted]" if len(line) > 4000 else redact_text(line) for line in lines
     ]
     omitted = False
     while clean and len("\n".join(clean).encode()) > _LOG_MAX_BYTES - 48:
