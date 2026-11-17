@@ -176,11 +176,12 @@ async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path, monkeypatch):
         with pytest.raises(ToolError, match="not authorized"):
             await client.call_tool("argocd_list_applications", {})
 
-    assert verify(audit_file) == (True, 15)
+    assert verify(audit_file) == (True, 14)
     records = [json.loads(line) for line in audit_file.read_text().splitlines()]
     assert [record["event"] for record in records].count("result") == 4
-    assert [record["event"] for record in records].count("denied") == 5
-    assert [record["event"] for record in records].count("error") == 1
+    assert [record["event"] for record in records].count("denied") == 6
+    assert [record["event"] for record in records].count("error") == 0
+    assert "https://evil.example.test" not in audit_file.read_text()
 
 
 def test_locked_upstream_dependencies_and_integrity():

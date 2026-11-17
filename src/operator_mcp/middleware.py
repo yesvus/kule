@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -74,6 +75,13 @@ class OperatorMiddleware(Middleware):
         call_id = uuid.uuid4().hex[:16]
         name = context.message.name
         args = dict(context.message.arguments or {})
+        audit_args = dict(args)
+        if name.startswith("argocd_"):
+            # Do not record caller-supplied origins in the audit trail,
+            # including URLs supplied to an unauthorized or invalid tool.
+            audit_args.pop("argocdBaseUrl", None)
+            if "argocdBaseUrl" in args:
+                audit_args["argocd_base_url_override"] = True
         caller = self._caller()
         who = {
             "call_id": call_id,
@@ -83,24 +91,41 @@ class OperatorMiddleware(Middleware):
         }
 
         if self.kill_switch.exists():
-            await self._audit("denied", reason="kill switch", args=args, **who)
+            await self._audit("denied", reason="kill switch", args=audit_args, **who)
             raise AuthorizationError("operator-mcp is disabled by the kill switch")
 
         tool = None
         if context.fastmcp_context is not None:
             tool = await context.fastmcp_context.fastmcp.get_tool(name)
         if tool is None:
-            await self._audit("denied", reason="unknown tool", args=args, **who)
+            await self._audit("denied", reason="unknown tool", args=audit_args, **who)
             raise AuthorizationError(f"tool '{name}' is not available")
 
         ok, reason = self.policy.allows(caller, tool.tags)
         if not ok:
-            await self._audit("denied", reason=reason, args=args, **who)
+            await self._audit("denied", reason=reason, args=audit_args, **who)
             # Keep the policy detail in the audit record, not in the response.
             raise AuthorizationError("not authorized")
 
+        if name.startswith("argocd_") and args.get("argocdBaseUrl") is not None:
+            # Validate BEFORE the normal call audit. The nested proxy also
+            # enforces the fixed origin, but it runs after this middleware.
+            from .tools.upstream_argocd import _url
+
+            supplied = args["argocdBaseUrl"]
+            try:
+                if not isinstance(supplied, str) or _url(supplied) != _url(
+                    os.environ.get("KULE_ARGOCD_BASE_URL", "")
+                ):
+                    raise ValueError("unapproved Argo endpoint")
+            except (RuntimeError, ValueError):
+                await self._audit(
+                    "denied", reason="Argo CD endpoint override", args=audit_args, **who
+                )
+                raise AuthorizationError("Argo CD endpoint override is not permitted") from None
+
         tier = self.policy.tier_of(tool.tags)
-        await self._audit("call", tier=tier, args=args, **who)
+        await self._audit("call", tier=tier, args=audit_args, **who)
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already
         # running in a worker thread cannot be interrupted; host tools must
