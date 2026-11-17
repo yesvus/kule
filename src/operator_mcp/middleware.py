@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import time
 import uuid
@@ -74,6 +75,7 @@ class OperatorMiddleware(Middleware):
         call_id = uuid.uuid4().hex[:16]
         name = context.message.name
         args = dict(context.message.arguments or {})
+        audit_args = _audit_arguments(name, args)
         caller = self._caller()
         who = {
             "call_id": call_id,
@@ -83,24 +85,24 @@ class OperatorMiddleware(Middleware):
         }
 
         if self.kill_switch.exists():
-            await self._audit("denied", reason="kill switch", args=args, **who)
+            await self._audit("denied", reason="kill switch", args=audit_args, **who)
             raise AuthorizationError("operator-mcp is disabled by the kill switch")
 
         tool = None
         if context.fastmcp_context is not None:
             tool = await context.fastmcp_context.fastmcp.get_tool(name)
         if tool is None:
-            await self._audit("denied", reason="unknown tool", args=args, **who)
+            await self._audit("denied", reason="unknown tool", args=audit_args, **who)
             raise AuthorizationError(f"tool '{name}' is not available")
 
         ok, reason = self.policy.allows(caller, tool.tags)
         if not ok:
-            await self._audit("denied", reason=reason, args=args, **who)
+            await self._audit("denied", reason=reason, args=audit_args, **who)
             # Keep the policy detail in the audit record, not in the response.
             raise AuthorizationError("not authorized")
 
         tier = self.policy.tier_of(tool.tags)
-        await self._audit("call", tier=tier, args=args, **who)
+        await self._audit("call", tier=tier, args=audit_args, **who)
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already
         # running in a worker thread cannot be interrupted; host tools must
@@ -130,6 +132,18 @@ class OperatorMiddleware(Middleware):
             raise ToolError(f"tool output exceeds {self.max_output_bytes} bytes")
         await self._audit("result", duration_ms=_ms(start), bytes=size, **who)
         return result
+
+
+def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Do not persist developer commands or file contents in audit records."""
+    if tool == "workspace_exec":
+        command = str(args.get("command", ""))
+        return {"command_bytes": len(command.encode()),
+                "command_sha256": hashlib.sha256(command.encode()).hexdigest()}
+    if tool == "workspace_write":
+        content = str(args.get("text", ""))
+        return {"path": args.get("path"), "text_bytes": len(content.encode())}
+    return args
 
 
 def _result_size(result: ToolResult) -> int:
