@@ -47,9 +47,7 @@ async def test_proxy_mount_only_exposes_explicit_read_allowlist(tmp_path):
     gateway.mount(create_proxy(backend), namespace="k8s")
     # Upstream Go MCP tool annotations are not Kule authorization tier tags.
     # Explicitly tag only the reviewed allowlisted tool.
-    gateway.add_transform(
-        ToolTransform({"k8s_pods_list": ToolTransformConfig(tags={"read"})})
-    )
+    gateway.add_transform(ToolTransform({"k8s_pods_list": ToolTransformConfig(tags={"read"})}))
 
     async with Client(gateway) as client:
         names = {tool.name for tool in await client.list_tools()}
