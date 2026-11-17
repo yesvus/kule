@@ -1,0 +1,18 @@
+# Source-only, opt-in upstream integration: disabled by default in Kule.
+# Upstream: github.com/containers/kubernetes-mcp-server
+log_file = "stderr"
+read_only = true
+list_output = "table"
+toolsets = ["core"]
+enabled_tools = ["pods_list", "events_list", "pods_log"]
+
+# Additional guardrails. Actual authorization is Kule operator groups + k3s RBAC.
+[[denied_resources]]
+group = ""
+version = "v1"
+kind = "Secret"
+
+[[denied_resources]]
+group = ""
+version = "v1"
+kind = "ConfigMap"
