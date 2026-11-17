@@ -13,10 +13,10 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
-from fastmcp.exceptions import AuthorizationError
-from fastmcp.server.middleware import Middleware
 from fastmcp.client.transports import StdioTransport
+from fastmcp.exceptions import AuthorizationError
 from fastmcp.server import create_proxy
+from fastmcp.server.middleware import Middleware
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.server.transforms.tool_transform import ToolTransformConfig
 
