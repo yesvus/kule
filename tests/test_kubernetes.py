@@ -144,7 +144,7 @@ async def test_k8s_overview_operator_only_with_audit(make_cfg, claims, monkeypat
     claims.value = OPERATOR
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
-        assert set(tools) == {"whoami", "note_write", "k8s_overview"}
+        assert set(tools) == {"whoami", "note_write", "k8s_overview", "k8s_pods", "k8s_deployments", "k8s_events"}
         assert tools["k8s_overview"].annotations.read_only_hint
         result = await client.call_tool("k8s_overview", {})
         assert result.data["pod_total"] == 2
