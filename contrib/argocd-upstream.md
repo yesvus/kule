@@ -2,7 +2,8 @@
 
 This source integration is **disabled by default**. It mounts
 [argoproj-labs/mcp-for-argocd](https://github.com/argoproj-labs/mcp-for-argocd),
-currently pinned to npm version **0.9.0**, as a local stdio child process
+pinned to npm version **0.9.0**, a checked-in integrity lockfile and a
+Node 22.16.0 multi-architecture base digest, as a local stdio child process
 behind Kule's existing OAuth, group authorization, timeout/output cap,
 kill-switch and tamper-evident audit middleware. No upstream HTTP port,
 second connector, privileged host shell or Kubernetes admin credential.
@@ -39,8 +40,9 @@ required. All writes, including sync, are absent.
 
    Set KULE_ARGOCD_BASE_URL to that **same** HTTPS origin. No paths, URLs
    supplied by users or extra registry destinations. The backend binds
-   the registry token to its registered base URL; per-call URL override
-   cannot route that token to an unregistered host.
+   the registry token to its registered base URL, and Kule's own
+   `_ArgoOriginGuard` additionally rejects per-tool `argocdBaseUrl`
+   overrides that differ from the configured fixed HTTPS origin.
 3. Only after reviewing the Argo token's native RBAC and TLS/network
    connectivity, set KULE_ARGOCD_UPSTREAM_ENABLED=1 in the existing Kule
    Deployment. Do not expose the upstream container or a separate Service.

@@ -1,6 +1,7 @@
 """Synthetic Argo CD observer contract: no live Argo credentials or network."""
 
 import json
+from pathlib import Path
 
 import pytest
 from fastmcp import Client, FastMCP
@@ -72,19 +73,28 @@ def test_stdio_transport_pins_observer_and_never_uses_default_token(monkeypatch,
     assert captured["env"]["MCP_READ_ONLY"] == "true"
     assert captured["env"]["ARGOCD_TOKEN_REGISTRY_PATH"] == str(registry)
     assert captured["env"]["ARGOCD_API_TOKEN"] == ""
-    assert "synthetic" not in repr(captured)
+    assert "fake-token" not in repr(captured)
 
 
-async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path):
+async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path, monkeypatch):
+    monkeypatch.setenv("KULE_ARGOCD_BASE_URL", "https://argocd.example.test")
     backend = FastMCP("synthetic-argocd")
 
     @backend.tool()
-    def list_applications() -> str:
+    def list_applications(argocdBaseUrl: str | None = None) -> str:
         return "apps-ok"
 
     @backend.tool()
     def get_application(applicationName: str) -> str:
         return applicationName
+
+    @backend.tool()
+    def get_application_resource_tree(applicationName: str) -> str:
+        return f"tree:{applicationName}"
+
+    @backend.tool()
+    def get_application_events(applicationName: str) -> str:
+        return f"events:{applicationName}"
 
     @backend.tool()
     def get_resources() -> str:
@@ -130,6 +140,8 @@ async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path):
         assert {tool.name for tool in await client.list_tools()} == {
             "argocd_list_applications",
             "argocd_get_application",
+            "argocd_get_application_resource_tree",
+            "argocd_get_application_events",
         }
         assert await client.list_resources() == []
         assert await client.list_prompts() == []
@@ -137,6 +149,18 @@ async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path):
         assert (
             await client.call_tool("argocd_get_application", {"applicationName": "staging"})
         ).data == "staging"
+        assert (
+            await client.call_tool(
+                "argocd_get_application_resource_tree", {"applicationName": "staging"}
+            )
+        ).data == "tree:staging"
+        assert (
+            await client.call_tool("argocd_get_application_events", {"applicationName": "staging"})
+        ).data == "events:staging"
+        with pytest.raises(ToolError, match="not permitted"):
+            await client.call_tool(
+                "argocd_list_applications", {"argocdBaseUrl": "https://evil.example.test"}
+            )
         for forbidden in (
             "argocd_sync_application",
             "argocd_delete_application",
@@ -152,4 +176,17 @@ async def test_argocd_proxy_exposes_only_reviewed_reads(tmp_path):
         with pytest.raises(ToolError, match="not authorized"):
             await client.call_tool("argocd_list_applications", {})
 
-    assert verify(audit_file)[0] is True
+    assert verify(audit_file) == (True, 15)
+    records = [json.loads(line) for line in audit_file.read_text().splitlines()]
+    assert [record["event"] for record in records].count("result") == 4
+    assert [record["event"] for record in records].count("denied") == 5
+    assert [record["event"] for record in records].count("error") == 1
+
+
+def test_locked_upstream_dependencies_and_integrity():
+    pkg = json.loads(Path("contrib/argocd-mcp/package.json").read_text())
+    lock = json.loads(Path("contrib/argocd-mcp/package-lock.json").read_text())
+    assert pkg["dependencies"]["argocd-mcp"] == "0.9.0"
+    assert lock["lockfileVersion"] == 3
+    assert lock["packages"]["node_modules/argocd-mcp"]["version"] == "0.9.0"
+    assert all(v.get("integrity") for k, v in lock["packages"].items() if k)

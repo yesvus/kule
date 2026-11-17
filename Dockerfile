@@ -11,8 +11,9 @@ RUN python -m pip wheel --no-cache-dir --wheel-dir /wheelhouse .
 FROM ghcr.io/containers/kubernetes-mcp-server@sha256:49928106385d3b17697a12c85805e8c377359173491aaa54d91d53a90d058933 AS kubernetes-upstream
 
 # Argo Project Labs MCP upstream, version-pinned and stdio-only.
-FROM node:22.16.0-bookworm-slim AS argocd-upstream
-RUN npm install --prefix /opt/argocd-mcp --omit=dev --ignore-scripts --no-audit --no-fund argocd-mcp@0.9.0
+FROM node:22.16.0-bookworm-slim@sha256:048ed02c5fd52e86fda6fbd2f6a76cf0d4492fd6c6fee9e2c463ed5108da0e34 AS argocd-upstream
+COPY contrib/argocd-mcp/package.json contrib/argocd-mcp/package-lock.json /opt/argocd-mcp/
+RUN cd /opt/argocd-mcp && npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 RUN test -f /opt/argocd-mcp/node_modules/argocd-mcp/dist/index.js
 
 FROM python:3.13.9-slim-bookworm AS runtime

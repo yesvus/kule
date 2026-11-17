@@ -13,6 +13,8 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from fastmcp import FastMCP
+from fastmcp.exceptions import AuthorizationError
+from fastmcp.server.middleware import Middleware
 from fastmcp.client.transports import StdioTransport
 from fastmcp.server import create_proxy
 from fastmcp.server.transforms import ToolTransform
@@ -96,10 +98,35 @@ def _transport() -> StdioTransport:
     )
 
 
+
+class _ArgoOriginGuard(Middleware):
+    """Do not let any tool argument override the fixed Argo instance origin.
+
+    The upstream token registry also pins each token to its origin; this
+    middleware independently prevents the child from reaching other hosts.
+    """
+
+    def __init__(self, expected_origin: str) -> None:
+        self.expected_origin = expected_origin
+
+    async def on_call_tool(self, context, call_next):
+        supplied = (context.message.arguments or {}).get("argocdBaseUrl")
+        if supplied is not None:
+            try:
+                if not isinstance(supplied, str) or _url(supplied) != self.expected_origin:
+                    raise ValueError("different upstream origin")
+            except (RuntimeError, ValueError):
+                # Do not echo attacker-provided URL in errors/audit output.
+                raise AuthorizationError("Argo CD endpoint override is not permitted") from None
+        return await call_next(context)
+
+
 def mount(mcp: FastMCP, *, synthetic_backend: FastMCP | None = None) -> None:
     """Mount reviewed status tools; synthetic backend bypasses secret startup."""
+    endpoint = _url(os.environ.get("KULE_ARGOCD_BASE_URL", ""))
     backend = synthetic_backend if synthetic_backend is not None else _transport()
     proxy = create_proxy(backend)
+    proxy.add_middleware(_ArgoOriginGuard(endpoint))
     # Parent middleware authorizes tool calls, not resource/prompt enumeration.
     proxy.disable(components={"resource", "template", "prompt"})
     mcp.mount(proxy, namespace="argocd")
