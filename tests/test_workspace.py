@@ -275,7 +275,8 @@ async def test_developer_group_lists_only_workspace_and_call_time_denies_operato
     async with Client(mcp) as client:
         names = {tool.name for tool in await client.list_tools()}
         assert names == {"workspace_exec", "workspace_read", "workspace_write"}
-        assert (await client.call_tool("workspace_read", {"path": "src/one.txt"})).data["text"] == "safe"
+        result = await client.call_tool("workspace_read", {"path": "src/one.txt"})
+        assert result.data["text"] == "safe"
         for forbidden, args in (
             ("whoami", {}),
             ("note_write", {"name": "denied", "text": "no"}),
