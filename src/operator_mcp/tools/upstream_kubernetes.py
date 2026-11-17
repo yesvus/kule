@@ -21,7 +21,7 @@ from operator_mcp.config import validate_k8s_api_url
 
 _BINARY = "/usr/local/bin/kubernetes-mcp-server"
 _CONFIG = "/usr/local/share/kule/kubernetes-upstream.toml"
-_KUBECONFIG = Path("/tmp/kule-upstream-kubeconfig.json")
+_KUBECONFIG = Path("/tmp/kule-upstream-kubeconfig.json")  # noqa: S108
 _TOKEN = Path("/var/run/kule-k8s/token")
 _CA = Path("/var/run/kule-k8s/ca.crt")
 
@@ -60,7 +60,7 @@ def mount(mcp: FastMCP, *, synthetic_backend: FastMCP | None = None) -> None:
             command=_BINARY,
             args=["--config", _CONFIG],
             # No OAuth client secret / signing key forwarded to the Go backend.
-            env={"KUBECONFIG": str(kubeconfig), "HOME": "/tmp"},
+            env={"KUBECONFIG": str(kubeconfig), "HOME": str(_KUBECONFIG.parent)},
         )
     else:
         target = synthetic_backend
