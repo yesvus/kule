@@ -98,7 +98,6 @@ def _transport() -> StdioTransport:
     )
 
 
-
 class _ArgoOriginGuard(Middleware):
     """Do not let any tool argument override the fixed Argo instance origin.
 
