@@ -1,0 +1,9 @@
+{
+  "name": "kule-argocd-upstream-lock",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Lockfile-only reproducible pinned Argo CD MCP upstream",
+  "dependencies": {
+    "argocd-mcp": "0.9.0"
+  }
+}
