@@ -56,7 +56,8 @@ def _list_items(base: str, path: str) -> list[dict]:
     token = _TOKEN_PATH.read_text().strip()
     if not token:
         raise RuntimeError("Kubernetes projected token is empty")
-    request = Request(
+    # _api_url enforces HTTPS-origin-only and path comes from _COLLECTIONS.
+    request = Request(  # noqa: S310
         base + path,
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
         method="GET",
