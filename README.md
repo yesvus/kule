@@ -3,15 +3,19 @@
 A small, self-hosted [MCP](https://modelcontextprotocol.io) server for a restricted
 operator pilot. It exposes tools to an AI client over Streamable HTTP, and every call
 is authenticated, authorized by group membership, and recorded in a tamper-evident
-audit log. The first release intentionally has **no host shell or Kubernetes access**.
+audit log. The currently deployed pilot has **no host shell or Kubernetes access**.
 It does not replace existing break-glass or remote management tools.
 
 ## Status
 
-**P1 spike. Not production.** The only tools today are `whoami` (read) and
-`note_write` (writes a note into a scratch directory). They exist to prove the
-authentication, authorization and audit paths end to end. There are no shell or
-host-changing tools yet, and the exec tier is wired but unused.
+**Current live pilot**: `whoami` (read) and `note_write` (scratch-only write)
+are authenticated through ChatGPT's OAuth connection. The optional
+`k8s_overview` tool in this PR is **source-only** until the companion
+`yesvus/ops` RBAC/network/token projection and a reviewed image digest are
+explicitly deployed. It summarizes Node readiness, per-namespace Pod counts,
+and unavailable Deployments without revealing raw Pod specifications, Secrets,
+logs, service-account tokens or allowing host shell / Kubernetes writes.
+The exec tier remains disabled.
 
 ## Architecture
 
@@ -20,7 +24,7 @@ host-changing tools yet, and the exec tier is wired but unused.
   client registration only accepts redirect URIs in
   `allowed_client_redirect_uris`. The default list covers ChatGPT and the
   documented exact Claude.ai manual OAuth-client callback; validate both client
-  flows end to end before public exposure.
+  flows end to end before considering them fully accepted.
 - **Authorization.** The token's groups claim decides access. Each tool carries exactly
   one tier tag:
   - `read`: needs `required_group`.
@@ -43,9 +47,10 @@ host-changing tools yet, and the exec tier is wired but unused.
   group tiny, and treat membership as root-equivalent.
 - **OAuth is not a sandbox.** Authentication says who is calling; it does not limit
   what a permitted tool can do once it runs.
-- **Timeouts stop waiting, not work.** A tool that blocks in a worker thread keeps
-  running after its deadline; tools that run commands must enforce their own
-  subprocess timeouts and kill the process.
+- **Timeouts limit waiting, not arbitrary work.** Worker-thread calls may
+  outlive cancellation. Kubernetes status reads use cancellable async HTTP
+  requests with an overall deadline; future host tools need their own
+  process-level timeouts and termination.
 - **Redaction is best-effort.** Known token shapes and `key=value` secrets are masked.
   Unusual secret formats can still reach the audit log or tool output. Tools must not
   read secrets in the first place.
@@ -134,9 +139,9 @@ Apache License 2.0. See [LICENSE](LICENSE).
 ## k3s dual-client pilot (ops #461)
 
 The deployment definitions and approval gates live in [yesvus/ops](https://github.com/yesvus/ops) under
-`cluster/operator-mcp-pilot/`. The client URL will be
-`https://mcp.yesvus.com/mcp`; do not expose this endpoint until the Authentik
-MFA fresh-login gate (#803), verified image digest and protected-route review pass.
+`cluster/operator-mcp-pilot/`. The owner-approved OAuth/MCP gateway is live at
+`https://mcp.yesvus.com/mcp`. Real ChatGPT DCR/OAuth and both pilot tools
+have been verified. Kubernetes access is a separate reviewed rollout.
 
 - ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check
   the exact callback selected by the ChatGPT plugin builder; write-tool support
@@ -150,5 +155,37 @@ MFA fresh-login gate (#803), verified image digest and protected-route review pa
 - Scratch notes, audit records and the kill switch use an isolated volume.
   Audits redact secrets best-effort; they must not be treated as durable external
   evidence until exported to the logging pipeline.
-- No developer-agent credentials, Docker socket, host paths, kubeconfig,
-  service-account token or host-operation tools are part of this pilot.
+- The currently deployed pilot contains no developer-agent credentials,
+  Docker socket, host paths, kubeconfig, service-account token or host tools.
+  An optional read-only Kubernetes observer would require a dedicated,
+  short-lived projected ServiceAccount identity in a separate rollout;
+  its token must never appear in tool output or audit logs.
+
+## Optional Kubernetes read-only overview (NOT LIVE until separate GitOps rollout)
+
+`k8s_overview` is registered **only** when the operator explicitly supplies
+`KULE_K8S_API_URL` (for example,
+`https://kubernetes-api.internal:6443`). The public OAuth server cannot choose an
+arbitrary Kubernetes API path or HTTP method. The fixed internal API requests
+list Nodes, Pods and Deployments; results are projected to aggregate status
+fields only and refuse a paginated or oversized list rather than silently
+claiming a partial healthy cluster.
+
+To run safely, GitOps must mount a short-lived, projected Kubernetes
+ServiceAccount token and the cluster CA at `/var/run/kule-k8s/token` and
+`/var/run/kule-k8s/ca.crt`. The ServiceAccount must retain
+`automountServiceAccountToken: false`. Its dedicated ClusterRole grants
+**only** `list` for core `nodes` / `pods` and apps `deployments`.
+No `get secrets`, `pods/log`, `pods/exec`, mutating verbs or
+`cluster-admin`. NetworkPolicy allows exactly
+the explicitly configured control-plane private endpoint on TCP 6443;
+the cluster CA validates the Kubernetes API certificate. Private IP,
+network-test outcomes and runtime admission evidence belong in the ops
+workstream, rather than this public code README.
+
+Enabling this source alone does **not** restart the running MCP Pod, update
+its publicly available tools, change RBAC, or authorize a rollout.
+The independent GitOps PR must pass exact-head review, RBAC
+`kubectl auth can-i` negatives and the live disposable token read
+before replacing the existing digest. SentinelX remains available for
+break-glass until the Kule operator functionality is independently tested.
