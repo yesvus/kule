@@ -312,7 +312,7 @@ def test_developer_feature_flag_cannot_enable_without_workspace_settings(tmp_pat
         '[server]\npublic_url = "https://mcp.example.com"\n'
         '[auth]\noidc_config_url = "https://id.example.com/.well-known/openid-configuration"\n'
         'client_id = "kule"\n'
-        '[tools]\ndeveloper_enabled = true\n'
+        "[tools]\ndeveloper_enabled = true\n"
     )
     env = {
         "OPERATOR_MCP_OIDC_CLIENT_SECRET": "synthetic",
