@@ -14,28 +14,45 @@ from operator_mcp.tools import kubernetes
 def _fixture_data(path: str) -> list[dict]:
     if path.startswith("/api/v1/nodes"):
         return [
-            {"metadata": {"name": "gurbet"},
-             "status": {"allocatable": {"cpu": "3500m", "memory": "20Gi"},
-                        "conditions": [{"type": "Ready", "status": "True"}]}},
-            {"metadata": {"name": "jelly"},
-             "status": {"allocatable": {"cpu": "2", "memory": "8Gi"},
-                        "conditions": [{"type": "Ready", "status": "False"}]}},
+            {
+                "metadata": {"name": "gurbet"},
+                "status": {
+                    "allocatable": {"cpu": "3500m", "memory": "20Gi"},
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                },
+            },
+            {
+                "metadata": {"name": "jelly"},
+                "status": {
+                    "allocatable": {"cpu": "2", "memory": "8Gi"},
+                    "conditions": [{"type": "Ready", "status": "False"}],
+                },
+            },
         ]
     if path.startswith("/api/v1/pods"):
         return [
-            {"metadata": {"name": "healthy", "namespace": "mcp-system"},
-             "spec": {"containers": [{"env": [{"value": "super-secret-canary"}]}]},
-             "status": {"phase": "Running", "conditions": [
-                 {"type": "Ready", "status": "True"}]}},
-            {"metadata": {"name": "waiting", "namespace": "staging"},
-             "status": {"phase": "Pending", "conditions": []}},
+            {
+                "metadata": {"name": "healthy", "namespace": "mcp-system"},
+                "spec": {"containers": [{"env": [{"value": "super-secret-canary"}]}]},
+                "status": {"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]},
+            },
+            {
+                "metadata": {"name": "waiting", "namespace": "staging"},
+                "status": {"phase": "Pending", "conditions": []},
+            },
         ]
     if path.startswith("/apis/apps/v1/deployments"):
         return [
-            {"metadata": {"name": "operator-mcp", "namespace": "mcp-system"},
-             "spec": {"replicas": 1}, "status": {"availableReplicas": 1}},
-            {"metadata": {"name": "unhealthy", "namespace": "staging"},
-             "spec": {"replicas": 2}, "status": {"availableReplicas": 1}},
+            {
+                "metadata": {"name": "operator-mcp", "namespace": "mcp-system"},
+                "spec": {"replicas": 1},
+                "status": {"availableReplicas": 1},
+            },
+            {
+                "metadata": {"name": "unhealthy", "namespace": "staging"},
+                "spec": {"replicas": 2},
+                "status": {"availableReplicas": 1},
+            },
         ]
     raise AssertionError("Unexpected Kubernetes API path")
 
@@ -48,13 +65,26 @@ def test_summary_has_no_secrets_specs_or_logs():
     )
     assert result["pod_total"] == 2
     assert [(n["name"], n["ready"]) for n in result["nodes"]] == [
-        ("gurbet", True), ("jelly", False),
+        ("gurbet", True),
+        ("jelly", False),
     ]
     assert result["namespace_pods"] == [
-        {"namespace": "mcp-system", "total": 1, "running": 1,
-         "pending": 0, "failed": 0, "not_ready": 0},
-        {"namespace": "staging", "total": 1, "running": 0,
-         "pending": 1, "failed": 0, "not_ready": 1},
+        {
+            "namespace": "mcp-system",
+            "total": 1,
+            "running": 1,
+            "pending": 0,
+            "failed": 0,
+            "not_ready": 0,
+        },
+        {
+            "namespace": "staging",
+            "total": 1,
+            "running": 0,
+            "pending": 1,
+            "failed": 0,
+            "not_ready": 1,
+        },
     ]
     assert result["unavailable_deployments"] == [
         {"namespace": "staging", "name": "unhealthy", "desired": 2, "available": 1}
@@ -64,11 +94,16 @@ def test_summary_has_no_secrets_specs_or_logs():
     assert "containers" not in str(result)
 
 
-@pytest.mark.parametrize("url", [
-    "http://10.0.1.248:6443", "https://user:password@localhost:6443",
-    "https://localhost:6443/api", "https://localhost:6443?watch=true",
-    "https://localhost:6443/#fragment",
-])
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://10.0.1.248:6443",
+        "https://user:password@localhost:6443",
+        "https://localhost:6443/api",
+        "https://localhost:6443?watch=true",
+        "https://localhost:6443/#fragment",
+    ],
+)
 def test_explicit_api_url_is_restricted(monkeypatch, url):
     monkeypatch.setenv("KULE_K8S_API_URL", url)
     with pytest.raises(ValueError):

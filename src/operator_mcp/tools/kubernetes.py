@@ -87,16 +87,21 @@ def summarize(nodes: list[dict], pods: list[dict], deployments: list[dict]) -> d
     for node in nodes:
         status = node.get("status", {})
         ready = next(
-            (c.get("status") == "True" for c in status.get("conditions", [])
-             if c.get("type") == "Ready"),
+            (
+                c.get("status") == "True"
+                for c in status.get("conditions", [])
+                if c.get("type") == "Ready"
+            ),
             False,
         )
-        node_status.append({
-            "name": node.get("metadata", {}).get("name", ""),
-            "ready": ready,
-            "allocatable_cpu": status.get("allocatable", {}).get("cpu"),
-            "allocatable_memory": status.get("allocatable", {}).get("memory"),
-        })
+        node_status.append(
+            {
+                "name": node.get("metadata", {}).get("name", ""),
+                "ready": ready,
+                "allocatable_cpu": status.get("allocatable", {}).get("cpu"),
+                "allocatable_memory": status.get("allocatable", {}).get("memory"),
+            }
+        )
 
     namespaces: dict[str, dict] = defaultdict(
         lambda: {"total": 0, "running": 0, "pending": 0, "failed": 0, "not_ready": 0}
@@ -122,12 +127,14 @@ def summarize(nodes: list[dict], pods: list[dict], deployments: list[dict]) -> d
         desired = deployment.get("spec", {}).get("replicas", 1)
         available = deployment.get("status", {}).get("availableReplicas", 0)
         if available < desired:
-            unhealthy_deployments.append({
-                "namespace": deployment.get("metadata", {}).get("namespace", ""),
-                "name": deployment.get("metadata", {}).get("name", ""),
-                "desired": desired,
-                "available": available,
-            })
+            unhealthy_deployments.append(
+                {
+                    "namespace": deployment.get("metadata", {}).get("namespace", ""),
+                    "name": deployment.get("metadata", {}).get("name", ""),
+                    "desired": desired,
+                    "available": available,
+                }
+            )
     return {
         "nodes": sorted(node_status, key=lambda n: n["name"]),
         "pod_total": len(pods),
