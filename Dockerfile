@@ -29,6 +29,7 @@ RUN /usr/local/bin/kubernetes-mcp-server --version >/dev/null
 COPY --from=argocd-upstream /usr/local/bin/node /usr/local/bin/node
 COPY --from=argocd-upstream /opt/argocd-mcp/node_modules /opt/argocd-mcp/node_modules
 COPY contrib/kubernetes-upstream.toml /usr/local/share/kule/kubernetes-upstream.toml
+COPY contrib/kubernetes-workspace.toml /usr/local/share/kule/kubernetes-workspace.toml
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse operator-mcp \
     && rm -rf /wheelhouse \
     && node --version >/dev/null

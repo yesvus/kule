@@ -27,18 +27,18 @@ class ConfigError(ValueError):
     pass
 
 
-def validate_k8s_api_url(raw: str) -> str | None:
+def validate_k8s_api_url(raw: str, setting: str = "KULE_K8S_API_URL") -> str | None:
     """Return HTTPS-only API origin or None; reject empty query delimiters."""
     if not raw:
         return None
     if raw != raw.strip() or "?" in raw or "#" in raw:
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without query or fragment")
+        raise ConfigError(f"{setting} must be an HTTPS origin without query or fragment")
     base = raw.rstrip("/")
     try:
         parsed = urlsplit(base)
         port = parsed.port
     except ValueError:
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin") from None
+        raise ConfigError(f"{setting} must be an HTTPS origin") from None
     if (
         parsed.scheme != "https"
         or not parsed.hostname
@@ -48,7 +48,7 @@ def validate_k8s_api_url(raw: str) -> str | None:
         or parsed.path
         or (port is not None and not 1 <= port <= 65535)
     ):
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without a path")
+        raise ConfigError(f"{setting} must be an HTTPS origin without a path")
     return base
 
 
@@ -74,6 +74,7 @@ class AuthConfig:
     )
     client_secret: str = field(default="", repr=False)
     jwt_signing_key: str = field(default="", repr=False)
+    workspace_group: str = "mcp-workspace"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class ToolsConfig:
     scratch_dir: Path = Path("/var/lib/operator-mcp/scratch")
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
+    workspace_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -168,6 +170,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         client_id=_str(a.get("client_id", ""), "auth.client_id"),
         required_group=_str(a.get("required_group", "mcp-operators"), "auth.required_group"),
         exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
+        workspace_group=_str(a.get("workspace_group", "mcp-workspace"), "auth.workspace_group"),
         groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
@@ -181,6 +184,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
+        workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
         scratch_dir=_path(
             t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
         ),
@@ -189,6 +193,16 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     # check-config validates the opt-in before any server startup.
     validate_k8s_api_url(env.get("KULE_K8S_API_URL", ""))
+    workspace_api = validate_k8s_api_url(
+        env.get("KULE_WORKSPACE_API_URL", ""), "KULE_WORKSPACE_API_URL"
+    )
+    if tools.workspace_enabled:
+        if not workspace_api:
+            raise ConfigError("KULE_WORKSPACE_API_URL is required when workspace_enabled is true")
+        if not env.get("KULE_WORKSPACE_POD") or not env.get("KULE_WORKSPACE_APPROVED_POD"):
+            raise ConfigError("workspace requires pinned and approved Pod names")
+        if env["KULE_WORKSPACE_POD"] != env["KULE_WORKSPACE_APPROVED_POD"]:
+            raise ConfigError("KULE_WORKSPACE_POD differs from approved Pod")
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)
     return cfg
@@ -213,10 +227,11 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
     if not cfg.auth.groups_claim:
         raise ConfigError("auth.groups_claim must not be empty")
-    if not cfg.auth.required_group or not cfg.auth.exec_group:
-        raise ConfigError("auth.required_group and auth.exec_group must not be empty")
-    if cfg.auth.required_group == cfg.auth.exec_group:
-        raise ConfigError("auth.exec_group must differ from auth.required_group")
+    groups = (cfg.auth.required_group, cfg.auth.exec_group, cfg.auth.workspace_group)
+    if any(not group for group in groups):
+        raise ConfigError("auth role groups must not be empty")
+    if len(set(groups)) != 3:
+        raise ConfigError("auth role groups must differ")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
     if not 1 <= cfg.tools.timeout_seconds <= 110:

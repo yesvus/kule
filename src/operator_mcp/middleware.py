@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import time
@@ -75,13 +76,7 @@ class OperatorMiddleware(Middleware):
         call_id = uuid.uuid4().hex[:16]
         name = context.message.name
         args = dict(context.message.arguments or {})
-        audit_args = dict(args)
-        if name.startswith("argocd_"):
-            # Do not record caller-supplied origins in the audit trail,
-            # including URLs supplied to an unauthorized or invalid tool.
-            audit_args.pop("argocdBaseUrl", None)
-            if "argocdBaseUrl" in args:
-                audit_args["argocd_base_url_override"] = True
+        audit_args = _audit_arguments(name, args)
         caller = self._caller()
         who = {
             "call_id": call_id,
@@ -155,6 +150,48 @@ class OperatorMiddleware(Middleware):
             raise ToolError(f"tool output exceeds {self.max_output_bytes} bytes")
         await self._audit("result", duration_ms=_ms(start), bytes=size, **who)
         return result
+
+
+def _audit_text_digest(value: Any, max_bytes: int) -> dict[str, Any]:
+    """Hash only bounded valid UTF-8 inputs; never allocate or persist huge values."""
+    if not isinstance(value, str) or len(value) > max_bytes:
+        return {"valid": False, "reason": "type-or-size"}
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        return {"valid": False, "reason": "invalid-utf8"}
+    if len(encoded) > max_bytes:
+        return {"valid": False, "reason": "size"}
+    return {"valid": True, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
+def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize Argo origin overrides and hash bounded Tezgah arguments."""
+    if tool.startswith("argocd_"):
+        sanitized = dict(args)
+        sanitized.pop("argocdBaseUrl", None)
+        if "argocdBaseUrl" in args:
+            sanitized["argocd_base_url_override"] = True
+        return sanitized
+    if tool == "workspace_exec":
+        metadata = _audit_text_digest(args.get("command"), 4096)
+        return {
+            "command_bytes": metadata.get("bytes"),
+            "command_sha256": metadata.get("sha256"),
+            "command_valid": metadata["valid"],
+        }
+    if tool in ("workspace_write", "workspace_read"):
+        metadata = _audit_text_digest(args.get("path"), 240)
+        result = {
+            "path_bytes": metadata.get("bytes"),
+            "path_sha256": metadata.get("sha256"),
+            "path_valid": metadata["valid"],
+        }
+        if tool == "workspace_write":
+            body = _audit_text_digest(args.get("text"), 8192)
+            result.update({"text_bytes": body.get("bytes"), "text_valid": body["valid"]})
+        return result
+    return args
 
 
 def _result_size(result: ToolResult) -> int:

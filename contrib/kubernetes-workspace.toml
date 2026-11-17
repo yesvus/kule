@@ -1,0 +1,16 @@
+# Dedicated, opt-in Tezgah-only MCP backend. Never mount the observer token.
+log_file = "stderr"
+kubeconfig = "/tmp/kule-workspace-kubeconfig.json"
+read_only = false
+toolsets = ["core"]
+enabled_tools = ["pods_exec"]
+
+[[denied_resources]]
+group = ""
+version = "v1"
+kind = "Secret"
+
+[[denied_resources]]
+group = ""
+version = "v1"
+kind = "ConfigMap"
