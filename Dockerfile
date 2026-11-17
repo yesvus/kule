@@ -18,6 +18,8 @@ RUN groupadd --gid 10001 operator-mcp \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent operator-mcp
 COPY --from=wheelhouse /wheelhouse /wheelhouse
 COPY --from=kubernetes-upstream /app/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server
+# Exercise the pinned Go binary under each target architecture during CI build.
+RUN /usr/local/bin/kubernetes-mcp-server --version >/dev/null
 COPY contrib/kubernetes-upstream.toml /usr/local/share/kule/kubernetes-upstream.toml
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse operator-mcp \
     && rm -rf /wheelhouse
