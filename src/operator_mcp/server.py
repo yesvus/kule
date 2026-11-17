@@ -70,6 +70,8 @@ def build_server(
         groups_claim=cfg.auth.groups_claim,
         workspace_group=cfg.auth.workspace_group,
         workspace_enabled=cfg.tools.workspace_enabled,
+        developer_group=cfg.auth.developer_group,
+        developer_enabled=cfg.tools.developer_enabled,
     )
     audit = AuditLog(cfg.audit.path)
     middleware = OperatorMiddleware(
