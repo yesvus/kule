@@ -178,3 +178,29 @@ async def test_garbage_bearer_token_is_rejected(
     async with running_app(make_cfg, oidc_discovery_url, monkeypatch, tmp_path) as client:
         resp = await client.post("/mcp", json=INITIALIZE, headers=headers)
     assert resp.status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [
+        (["openid", "profile"], "openid profile offline_access"),
+        (["openid", "profile", "email"], "openid profile email offline_access"),
+        (["openid", "profile", "offline_access"], "openid profile offline_access"),
+    ],
+)
+def test_upstream_refresh_scope_preserves_client_scopes(
+    make_cfg, oidc_discovery_url, requested, expected
+):
+    """Only add offline_access upstream; retain all client-requested scopes."""
+    from urllib.parse import parse_qs, urlsplit
+
+    cfg = make_cfg()
+    cfg = replace(cfg, auth=replace(cfg.auth, oidc_config_url=oidc_discovery_url))
+    proxy = build_auth(cfg)
+    # Only the local synthetic IdP is contacted. No real login or bearer.
+    url = proxy._build_upstream_authorize_url("synthetic-transaction", {"scopes": requested})
+    params = parse_qs(urlsplit(url).query)
+    assert params["scope"] == [expected]
+    assert params["response_type"] == ["code"]
+    assert params["redirect_uri"] == [f"{PUBLIC_URL}/auth/callback"]
+    assert proxy.required_scopes == ["openid", "profile"]

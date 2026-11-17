@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 from fastmcp import FastMCP
 from fastmcp.server.auth import AuthProvider
+from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from .audit import AuditLog
 from .authz import Policy
@@ -20,13 +22,26 @@ INSTRUCTIONS = (
 )
 
 
-def build_auth(cfg: Config) -> AuthProvider:
-    from fastmcp.server.auth.oidc_proxy import OIDCProxy
+class AuthentikRefreshOIDCProxy(OIDCProxy):
+    """Preserve requested scopes while asking Authentik for a refresh token.
 
+    FastMCP 4.2.0 forwards the client's scopes verbatim. ChatGPT currently
+    requests only openid/profile, but Authentik requires offline_access for
+    refresh token issuance. Add it upstream without dropping optional client
+    scopes, and keep Kule's own group/tool authorization unchanged.
+    """
+
+    def _build_upstream_authorize_url(self, txn_id: str, transaction: dict[str, Any]) -> str:
+        requested = transaction.get("scopes") or self.required_scopes or []
+        scopes = list(dict.fromkeys([*requested, "offline_access"]))
+        return super()._build_upstream_authorize_url(txn_id, {**transaction, "scopes": scopes})
+
+
+def build_auth(cfg: Config) -> AuthProvider:
     # Keep FastMCP's encrypted OAuth state under our state directory.
     # Set unconditionally: an inherited value must not redirect or share it.
     os.environ["FASTMCP_HOME"] = str(cfg.server.state_dir / "fastmcp")
-    return OIDCProxy(
+    return AuthentikRefreshOIDCProxy(
         config_url=cfg.auth.oidc_config_url,
         client_id=cfg.auth.client_id,
         client_secret=cfg.auth.client_secret,

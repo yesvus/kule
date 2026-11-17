@@ -164,7 +164,7 @@ def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
     def fake_proxy(**kwargs):
         raise Stop
 
-    monkeypatch.setattr("fastmcp.server.auth.oidc_proxy.OIDCProxy", fake_proxy)
+    monkeypatch.setattr(srv, "AuthentikRefreshOIDCProxy", fake_proxy)
     with pytest.raises(Stop):
         srv.build_auth(cfg)
     assert os.environ["FASTMCP_HOME"] == str(cfg.server.state_dir / "fastmcp")
