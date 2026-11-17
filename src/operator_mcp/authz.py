@@ -12,8 +12,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-READ, OPERATE, EXEC = "read", "operate", "exec"
-TIERS = (READ, OPERATE, EXEC)
+READ, OPERATE, EXEC, WORKSPACE = "read", "operate", "exec", "workspace"
+TIERS = (READ, OPERATE, EXEC, WORKSPACE)
 
 
 @dataclass(frozen=True)
@@ -38,16 +38,20 @@ class Policy:
     exec_group: str
     exec_enabled: bool
     groups_claim: str = "groups"
+    workspace_group: str = "mcp-workspace"
+    workspace_enabled: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("required_group", "exec_group", "groups_claim"):
+        for name in ("required_group", "exec_group", "workspace_group", "groups_claim"):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
         if not isinstance(self.exec_enabled, bool):
             raise ValueError("exec_enabled must be a bool")
-        if self.required_group == self.exec_group:
-            raise ValueError("exec_group must differ from required_group")
+        if len({self.required_group, self.exec_group, self.workspace_group}) != 3:
+            raise ValueError("required, exec and workspace groups must differ")
+        if not isinstance(self.workspace_enabled, bool):
+            raise ValueError("workspace_enabled must be a bool")
 
     def caller_from_claims(self, claims: Mapping[str, Any] | None) -> Caller | None:
         if not claims:
@@ -71,6 +75,11 @@ class Policy:
             return False, "tool has no single tier tag"
         if self.required_group not in caller.groups:
             return False, f"caller is not in {self.required_group}"
+        if tier == WORKSPACE:
+            if not self.workspace_enabled:
+                return False, "workspace tier is disabled"
+            if self.workspace_group not in caller.groups:
+                return False, f"caller is not in {self.workspace_group}"
         if tier == EXEC:
             if not self.exec_enabled:
                 return False, "exec tier is disabled"
