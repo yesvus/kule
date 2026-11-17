@@ -70,3 +70,72 @@ def test_policy_rejects_non_string_settings():
         Policy(required_group=5, exec_group="x", exec_enabled=False)
     with pytest.raises(ValueError):
         Policy(required_group="a", exec_group="b", exec_enabled="false")
+
+
+def test_opt_in_developer_identity_can_only_use_workspace():
+    policy = Policy(
+        required_group="ops",
+        exec_group="ops-exec",
+        exec_enabled=True,
+        workspace_group="workspace",
+        workspace_enabled=True,
+        developer_group="low-priv-dev",
+        developer_enabled=True,
+    )
+    c = policy.caller_from_claims({
+        "sub": "agent-low",
+        "groups": ["low-priv-dev", "workspace"],
+    })
+    assert policy.allows(c, {"workspace"}) == (True, "ok")
+    for tier in (READ, OPERATE, EXEC):
+        assert policy.allows(c, {tier})[0] is False
+    assert policy.allows(c, {"workspace", READ})[0] is False
+    assert policy.allows(c, set())[0] is False
+
+
+def test_developer_gate_fails_closed_without_both_groups_and_feature_flag():
+    base = dict(
+        required_group="ops",
+        exec_group="ops-exec",
+        exec_enabled=False,
+        workspace_group="workspace",
+        workspace_enabled=True,
+        developer_group="low-priv-dev",
+    )
+    active = Policy(**base, developer_enabled=True)
+    dev_only = active.caller_from_claims({"sub": "agent", "groups": ["low-priv-dev"]})
+    workspace_only = active.caller_from_claims({"sub": "agent", "groups": ["workspace"]})
+    neither = active.caller_from_claims({"sub": "agent", "groups": []})
+    for c in (dev_only, workspace_only, neither):
+        assert active.allows(c, {"workspace"})[0] is False
+    with_both = active.caller_from_claims({"sub": "agent", "groups": ["low-priv-dev", "workspace"]})
+    assert Policy(**base, developer_enabled=False).allows(with_both, {"workspace"})[0] is False
+    assert Policy(**{**base, "workspace_enabled": False}, developer_enabled=True).allows(
+        with_both, {"workspace"}
+    )[0] is False
+
+
+def test_developer_gate_does_not_reduce_existing_operator_access():
+    p = Policy(
+        required_group="ops",
+        exec_group="ops-exec",
+        exec_enabled=True,
+        workspace_group="workspace",
+        workspace_enabled=True,
+        developer_group="low-priv-dev",
+        developer_enabled=True,
+    )
+    owner = p.caller_from_claims({"sub": "owner", "groups": ["ops", "workspace", "ops-exec"]})
+    assert all(p.allows(owner, {tier})[0] for tier in (READ, OPERATE, EXEC, "workspace"))
+    base_only = p.caller_from_claims({"sub": "owner", "groups": ["ops"]})
+    assert p.allows(base_only, {READ})[0] is True
+    assert p.allows(base_only, {"workspace"})[0] is False
+
+
+def test_developer_group_must_be_distinct_and_enablement_bool():
+    with pytest.raises(ValueError):
+        Policy("ops", "ops-exec", False, developer_group="ops")
+    with pytest.raises(ValueError):
+        Policy("ops", "ops-exec", False, developer_group="mcp-workspace")
+    with pytest.raises(ValueError):
+        Policy("ops", "ops-exec", False, developer_enabled="true")
