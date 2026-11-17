@@ -234,8 +234,10 @@ def validate(cfg: Config) -> None:
     if not cfg.auth.groups_claim:
         raise ConfigError("auth.groups_claim must not be empty")
     groups = (
-        cfg.auth.required_group, cfg.auth.exec_group,
-        cfg.auth.workspace_group, cfg.auth.developer_group,
+        cfg.auth.required_group,
+        cfg.auth.exec_group,
+        cfg.auth.workspace_group,
+        cfg.auth.developer_group,
     )
     if any(not group for group in groups):
         raise ConfigError("auth role groups must not be empty")
