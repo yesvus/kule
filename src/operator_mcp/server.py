@@ -31,14 +31,10 @@ class AuthentikRefreshOIDCProxy(OIDCProxy):
     scopes, and keep Kule's own group/tool authorization unchanged.
     """
 
-    def _build_upstream_authorize_url(
-        self, txn_id: str, transaction: dict[str, Any]
-    ) -> str:
+    def _build_upstream_authorize_url(self, txn_id: str, transaction: dict[str, Any]) -> str:
         requested = transaction.get("scopes") or self.required_scopes or []
         scopes = list(dict.fromkeys([*requested, "offline_access"]))
-        return super()._build_upstream_authorize_url(
-            txn_id, {**transaction, "scopes": scopes}
-        )
+        return super()._build_upstream_authorize_url(txn_id, {**transaction, "scopes": scopes})
 
 
 def build_auth(cfg: Config) -> AuthProvider:
