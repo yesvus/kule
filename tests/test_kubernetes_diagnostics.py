@@ -92,7 +92,10 @@ async def test_allowed_operator_sees_tools_and_namespaced_paths(make_cfg, claims
 
     async def fake_events(base, ns, timeout_seconds):
         calls.append(f"/api/v1/namespaces/{ns}/events")
-        return ([{"metadata": {"creationTimestamp": "2026-11-17T15:00:00Z"}, "message": "ready"}], False)
+        return (
+            [{"metadata": {"creationTimestamp": "2026-11-17T15:00:00Z"}, "message": "ready"}],
+            False,
+        )
 
     def log_handler(request):
         calls.append(str(request.url))
