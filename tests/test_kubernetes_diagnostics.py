@@ -88,22 +88,24 @@ async def test_allowed_operator_sees_tools_and_namespaced_paths(make_cfg, claims
                     "status": {"readyReplicas": 1},
                 }
             ]
-        if path.endswith("/events?limit=500"):
-            return [{"metadata": {"creationTimestamp": "2026-11-17T15:00:00Z"}, "message": "ready"}]
         raise AssertionError(path)
 
-    async def fake_log_text(client, base, path, headers):
-        calls.append(path)
-        return "safe logs"
+    async def fake_events(base, ns, timeout_seconds):
+        calls.append(f"/api/v1/namespaces/{ns}/events")
+        return ([{"metadata": {"creationTimestamp": "2026-11-17T15:00:00Z"}, "message": "ready"}], False)
+
+    def log_handler(request):
+        calls.append(str(request.url))
+        return httpx2.Response(200, text="safe logs")
 
     monkeypatch.setattr(d, "_collection", fake_collection)
-    monkeypatch.setattr(d, "_log_text", fake_log_text)
+    monkeypatch.setattr(d, "_events_collection", fake_events)
     monkeypatch.setattr(d, "_headers", lambda: {"Authorization": "Bearer synthetic"})
     monkeypatch.setattr(
         d,
         "_client",
         lambda: httpx2.AsyncClient(
-            transport=httpx2.MockTransport(lambda req: httpx2.Response(200))
+            transport=httpx2.MockTransport(log_handler)
         ),
     )
     cfg = make_cfg()
@@ -171,3 +173,91 @@ async def test_log_redirect_denied_before_follow():
                 {"Authorization": "Bearer synthetic"},
             )
     assert visited == ["10.0.1.248"]
+
+
+
+def test_pod_names_accept_dns_subdomains_but_reject_injection():
+    assert d._pod_name("a." + "b" * 63 + ".c") == "a." + "b" * 63 + ".c"
+    for bad in ("../x", "foo/bar", "a?watch=true", "bad%2fname", "x" * 254, ""):
+        with pytest.raises(ValueError):
+            d._pod_name(bad)
+
+
+def test_redact_event_before_bounding_message():
+    secret = "synthetic-not-real-password-abcdef"
+    event = {"message": ("a" * 310) + " api_key=" + secret + " tail"}
+    result = d._event_summary(event)["message"]
+    assert len(result) <= 350
+    assert secret not in result
+
+
+async def test_real_log_stream_redacts_and_keeps_latest_lines():
+    lines = ["older-" + "x" * 90 + str(i) for i in range(100)]
+    secret = "synthetic-secret-value"
+    lines.append("Authorization: Bearer " + "a" * 20)
+    lines.append("api_key=" + secret)
+    lines.append("LATEST_DIAGNOSTIC_LINE")
+    blob = "\n".join(lines)
+
+    async def handler(request):
+        return httpx2.Response(200, text=blob)
+
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(handler), follow_redirects=False
+    ) as client:
+        output = await d._log_text(
+            client,
+            "https://10.0.1.248:6443",
+            "/api/v1/namespaces/birted-staging/pods/web/log?tailLines=50",
+            {"Authorization": "Bearer synthetic"},
+        )
+    assert "LATEST_DIAGNOSTIC_LINE" in output
+    assert "older-" + "x" * 90 + "0" not in output
+    assert "[REDACTED]" in output
+    assert secret not in output
+    assert len(output.encode()) <= d._LOG_MAX_BYTES
+
+
+async def test_real_log_stream_refuses_oversize_body():
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(
+            lambda request: httpx2.Response(200, content=b"x" * (d._LOG_FETCH_MAX_BYTES + 1))
+        ),
+        follow_redirects=False,
+    ) as client:
+        with pytest.raises(RuntimeError, match="bounded"):
+            await d._log_text(
+                client, "https://10.0.1.248:6443", "/api/v1/namespaces/birted-staging/pods/web/log",
+                {"Authorization": "Bearer synthetic"},
+            )
+
+
+async def test_event_pages_continue_bounded(monkeypatch):
+    observed = []
+
+    def handler(request):
+        observed.append(str(request.url))
+        token = request.url.params.get("continue")
+        value = {
+            "": "next-1",
+            "next-1": "next-2",
+            "next-2": "next-3",
+        }
+        return httpx2.Response(
+            200,
+            json={"items": [{"reason": "Test", "metadata": {"name": token or "first"}}],
+                  "metadata": {"continue": value.get(token or "", "")}},
+        )
+
+    monkeypatch.setattr(d, "_headers", lambda: {"Authorization": "Bearer synthetic"})
+    monkeypatch.setattr(
+        d, "_client",
+        lambda: httpx2.AsyncClient(transport=httpx2.MockTransport(handler), follow_redirects=False),
+    )
+    events, truncated = await d._events_collection(
+        "https://10.0.1.248:6443", "birted-staging", 30,
+    )
+    assert len(events) == 3
+    assert truncated is True
+    assert len(observed) == 3
+    assert "continue=next-1" in observed[1]
