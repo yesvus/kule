@@ -11,7 +11,7 @@ from .audit import AuditLog
 from .authz import Policy
 from .config import Config
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
-from .tools import basic, kubernetes
+from .tools import basic, kubernetes, kubernetes_diagnostics
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -71,4 +71,5 @@ def build_server(
     )
     basic.register(mcp, cfg, claims_getter, policy)
     kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+    kubernetes_diagnostics.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
     return mcp
