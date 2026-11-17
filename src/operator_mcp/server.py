@@ -36,6 +36,11 @@ def build_auth(cfg: Config) -> AuthProvider:
         # `profile` carries the groups claim in authentik's default mappings.
         required_scopes=["openid", "profile"],
         valid_scopes=["openid", "profile", "email", "offline_access"],
+        # Authentik issues refresh tokens only when its own upstream request includes
+        # offline_access. ChatGPT DCR requests only openid/profile; without this
+        # upstream-only scope, FastMCP cannot issue a client refresh token.
+        # Keep client authorization tiers and group requirements unchanged.
+        extra_authorize_params={"scope": "openid profile offline_access"},
         jwt_signing_key=cfg.auth.jwt_signing_key,
         allowed_client_redirect_uris=cfg.auth.allowed_client_redirect_uris,
         require_authorization_consent=True,
