@@ -80,3 +80,37 @@ Do not grant `pods` list/watch, Kubernetes Secrets, production `pods/exec`, cros
 - Verify a separate trusted Tailscale SSH / OCI emergency path before any owner-authorized SentinelX shutdown.
 
 **No live production or staging action, Tezgah filesystem mutation, Kule image promotion, or SentinelX cutover is implied by source merge.**
+
+
+## Separate cheap developer identity (ops #1108 — source-only)
+
+By default Kule requires `auth.required_group` (the existing operator group) for all roles. To avoid granting an inexpensive agent operator credentials simply to use Tezgah, Kule now supports a **separately gated developer workspace identity**; it does *not* grant Kubernetes observation, `note_write`, generic exec, Secret reads, Argo sync, or operator privileges.
+
+Optional, **do not enable in the live operator gateway yet**:
+
+```toml
+[auth]
+required_group = "mcp-gurbet-operators" # existing operator policy, unchanged
+workspace_group = "mcp-workspace"       # distinct explicit workspace grant
+developer_group = "mcp-developers"      # new developer identity
+
+[tools]
+workspace_enabled = false              # leave disabled until #731 and targeted Pod RBAC
+developer_enabled = false              # extra gate for non-operator workspace access
+```
+
+Effective policy (both tool discovery and call-time authorization):
+
+| Caller groups | Read/operate Kubernetes & notes | Workspace | Global exec |
+| --- | --- | --- | --- |
+| `mcp-gurbet-operators` | Existing operator grants | Requires `mcp-workspace` and `workspace_enabled` | Existing dedicated exec group plus opt-in |
+| `mcp-developers` + `mcp-workspace`, no operator group | **No** | Only when **both** `workspace_enabled` and `developer_enabled` are true | **No** |
+| `mcp-developers` alone | **No** | **No** | **No** |
+| `mcp-workspace` alone | **No** | **No** | **No** |
+| Unauthenticated/other | **No** | **No** | **No** |
+
+This is a **source capability only**, not a provisioned machine OAuth client, Authentik group, JWT issuer, independent namespace ServiceAccount, or a secure worker sandbox. Full enablement is blocked by #731 (legacy broad GitHub PAT/personal SSH key in migrated shared HOME), and by review of Kule's exact-Pod Tezgah `pods/exec` identity, negative Kubernetes rights, and actual authenticated non-operator agent token behavior. Separate worker identities must be verified end to end; never assign cheap agents `mcp-gurbet-operators` as a workaround.
+
+**Limit:** All Tezgah agents sharing UID 10001/HOME remain in the *same trust domain*. `workspace_exec` can read all files available to that UID. Git worktrees are concurrency organization, not permission isolation. For a stricter reader-only agent, use a separate backend/credential boundary rather than giving it a shell or relabeling unrestricted Kubernetes reads as observer-safe.
+
+The feature flags **remain false** in `yesvus/ops` until the credential isolation and independent identity gates are accepted. This code change must not modify the live Kule OAuth DCR state or require SentinelX retirement.
