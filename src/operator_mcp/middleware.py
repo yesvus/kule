@@ -138,8 +138,10 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
     """Do not persist developer commands or file contents in audit records."""
     if tool == "workspace_exec":
         command = str(args.get("command", ""))
-        return {"command_bytes": len(command.encode()),
-                "command_sha256": hashlib.sha256(command.encode()).hexdigest()}
+        return {
+            "command_bytes": len(command.encode()),
+            "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+        }
     if tool == "workspace_write":
         content = str(args.get("text", ""))
         return {"path": args.get("path"), "text_bytes": len(content.encode())}

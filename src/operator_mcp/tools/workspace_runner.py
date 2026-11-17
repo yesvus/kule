@@ -3,6 +3,7 @@
 Executed only by the pinned Pod's dev container through Kubernetes pods/exec.
 The calling Kubernetes identity MUST additionally be restricted by resourceNames.
 """
+
 from __future__ import annotations
 
 import base64
@@ -21,10 +22,21 @@ ROOT = Path("/workspace")
 MAX_BYTES = 8192
 MAX_SECONDS = 8.0
 MARKER = "KULE_WS_RESULT:"
-_DENIED_PARTS = frozenset({
-    ".git", ".ssh", ".config", ".env", "secrets", "credentials",
-    "private", "tokens", ".kube", ".aws", ".oci",
-})
+_DENIED_PARTS = frozenset(
+    {
+        ".git",
+        ".ssh",
+        ".config",
+        ".env",
+        "secrets",
+        "credentials",
+        "private",
+        "tokens",
+        ".kube",
+        ".aws",
+        ".oci",
+    }
+)
 
 
 def _path_parts(value: str) -> tuple[str, ...]:
@@ -32,8 +44,7 @@ def _path_parts(value: str) -> tuple[str, ...]:
         raise ValueError("path must be a short relative workspace path")
     parts = tuple(value.split("/"))
     if any(
-        not p or p in (".", "..") or p.startswith(".") or p.lower() in _DENIED_PARTS
-        for p in parts
+        not p or p in (".", "..") or p.startswith(".") or p.lower() in _DENIED_PARTS for p in parts
     ):
         raise ValueError("hidden, sensitive, or traversal path refused")
     return parts
@@ -85,8 +96,10 @@ def _write(path: str, text: str) -> dict:
         if mode is not None and not stat.S_ISREG(mode):
             raise ValueError("destination must be a regular file")
         fd = os.open(
-            tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-            0o600, dir_fd=directory,
+            tmp,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=directory,
         )
         try:
             with os.fdopen(fd, "wb", closefd=True) as stream:
@@ -117,8 +130,12 @@ def _exec(command: str) -> dict:
     if not command.strip() or len(command.encode()) > 4096 or "\x00" in command:
         raise ValueError("command must be 1..4096 bytes")
     proc = subprocess.Popen(  # noqa: S603 (intentional in-container dev-user exec)
-        ["/bin/sh", "-c", command], cwd=ROOT, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
+        ["/bin/sh", "-c", command],
+        cwd=ROOT,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
         close_fds=True,
     )
     output = bytearray()
@@ -148,8 +165,10 @@ def _exec(command: str) -> dict:
     else:
         proc.wait(timeout=2)
     return {
-        "exit_code": proc.returncode, "stdout": output[:MAX_BYTES].decode("utf-8", "replace"),
-        "timed_out": timed_out, "output_exceeded": exceeded,
+        "exit_code": proc.returncode,
+        "stdout": output[:MAX_BYTES].decode("utf-8", "replace"),
+        "timed_out": timed_out,
+        "output_exceeded": exceeded,
     }
 
 

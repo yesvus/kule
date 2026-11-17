@@ -1,4 +1,5 @@
 """Source-only workspace tool tests. No cluster or developer secrets required."""
+
 from __future__ import annotations
 
 import json
@@ -11,18 +12,23 @@ from operator_mcp.authz import WORKSPACE, Policy
 from operator_mcp.server import build_server
 from operator_mcp.tools import workspace, workspace_runner
 
-
 POD = "coder-0267ee20-71a5-4b13-9917-bdf2a37c4c94-77895f6649-mxxv2"
 
 
 def test_workspace_role_is_separate_from_global_exec():
     p = Policy(
-        required_group="ops", exec_group="ops-exec", exec_enabled=False,
-        workspace_group="ops-workspace", workspace_enabled=True,
+        required_group="ops",
+        exec_group="ops-exec",
+        exec_enabled=False,
+        workspace_group="ops-workspace",
+        workspace_enabled=True,
     )
-    workspace_operator = p.caller_from_claims({
-        "sub": "owner", "groups": ["ops", "ops-workspace"],
-    })
+    workspace_operator = p.caller_from_claims(
+        {
+            "sub": "owner",
+            "groups": ["ops", "ops-workspace"],
+        }
+    )
     assert p.allows(workspace_operator, {WORKSPACE})[0] is True
     assert p.allows(workspace_operator, {"exec"})[0] is False
     ordinary = p.caller_from_claims({"sub": "other", "groups": ["ops"]})
@@ -126,12 +132,21 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
         assert "workspace_exec" in names
         result = await client.call_tool("workspace_exec", {"command": "printf sensitive-value"})
         assert result.data["exit_code"] == 0
-        await client.call_tool("workspace_write", {
-            "path": "test.txt", "text": "credential-value-not-for-audit",
-        })
-        assert (await client.call_tool("workspace_read", {
-            "path": "test.txt",
-        })).data["text"] == "sample"
+        await client.call_tool(
+            "workspace_write",
+            {
+                "path": "test.txt",
+                "text": "credential-value-not-for-audit",
+            },
+        )
+        assert (
+            await client.call_tool(
+                "workspace_read",
+                {
+                    "path": "test.txt",
+                },
+            )
+        ).data["text"] == "sample"
 
     assert all(record[0] == POD for record in requests)
     assert [record[1] for record in requests] == ["exec", "write", "read"]
@@ -143,6 +158,7 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
 
 def test_workspace_upstream_config_only_exposes_pods_exec():
     import tomllib
+
     with open("contrib/kubernetes-workspace.toml", "rb") as stream:
         cfg = tomllib.load(stream)
     assert cfg["toolsets"] == ["core"]

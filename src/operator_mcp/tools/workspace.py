@@ -3,6 +3,7 @@
 The Pod name is pinned at deployment time. There is no arbitrary Kubernetes
 target, API path, host shell, node SSH, or inherited operator observer token.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -43,14 +44,18 @@ def _target() -> tuple[str, str]:
 
 def _write_kubeconfig(api_url: str) -> None:
     config = {
-        "apiVersion": "v1", "kind": "Config",
-        "clusters": [{"name": "workspace", "cluster": {
-            "server": api_url, "certificate-authority": str(_CA)
-        }}],
+        "apiVersion": "v1",
+        "kind": "Config",
+        "clusters": [
+            {"name": "workspace", "cluster": {"server": api_url, "certificate-authority": str(_CA)}}
+        ],
         "users": [{"name": "workspace", "user": {"tokenFile": str(_TOKEN)}}],
-        "contexts": [{"name": "workspace", "context": {
-            "cluster": "workspace", "user": "workspace", "namespace": "coder"
-        }}],
+        "contexts": [
+            {
+                "name": "workspace",
+                "context": {"cluster": "workspace", "user": "workspace", "namespace": "coder"},
+            }
+        ],
         "current-context": "workspace",
     }
     fd = os.open(_CONFIG, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
@@ -64,12 +69,14 @@ async def _invoke(pod: str, operation: str, payload: dict, timeout: float) -> di
     # No shell interpolation at the MCP layer. Only the runner's explicit
     # exec operation invokes a shell *inside the selected dev container*.
     arguments = {
-        "name": pod, "namespace": "coder", "container": "dev",
-        "command": ["python3", "-c", Path(workspace_runner.__file__).read_text(),
-                    operation, data],
+        "name": pod,
+        "namespace": "coder",
+        "container": "dev",
+        "command": ["python3", "-c", Path(workspace_runner.__file__).read_text(), operation, data],
     }
     transport = StdioTransport(
-        command=_BINARY, args=["--config", _BACKEND_CONFIG],
+        command=_BINARY,
+        args=["--config", _BACKEND_CONFIG],
         env={"HOME": str(_CONFIG.parent)},
     )
     async with asyncio.timeout(min(20.0, max(1.0, timeout - 1.0))):
