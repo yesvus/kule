@@ -168,3 +168,22 @@ def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
     with pytest.raises(Stop):
         srv.build_auth(cfg)
     assert os.environ["FASTMCP_HOME"] == str(cfg.server.state_dir / "fastmcp")
+
+def test_oidc_upstream_requests_refresh_scope_without_client_offline_access(make_cfg):
+    """A ChatGPT openid/profile request must still request IdP refresh capability."""
+    from urllib.parse import parse_qs, urlsplit
+
+    from operator_mcp.server import build_auth
+
+    proxy = build_auth(make_cfg())
+    # Pure URL-construction test; no login, real bearer, or remote IdP call.
+    proxy._upstream_authorization_endpoint = "https://id.example.invalid/authorize"
+    url = proxy._build_upstream_authorize_url(
+        "synthetic-transaction", {"scopes": ["openid", "profile"]}
+    )
+    params = parse_qs(urlsplit(url).query)
+    assert params["scope"] == ["openid profile offline_access"]
+    assert params["response_type"] == ["code"]
+    assert params["redirect_uri"] == ["https://mcp.example.com/auth/callback"]
+    assert proxy.required_scopes == ["openid", "profile"]
+
