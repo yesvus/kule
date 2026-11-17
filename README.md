@@ -8,13 +8,13 @@ It does not replace existing break-glass or remote management tools.
 
 ## Status
 
-**Current live pilot**: `whoami` (read) and `note_write` (scratch-only write)
-are authenticated through ChatGPT's OAuth connection. The optional
-`k8s_overview` tool in this PR is **source-only** until the companion
-`yesvus/ops` RBAC/network/token projection and a reviewed image digest are
-explicitly deployed. It summarizes Node readiness, per-namespace Pod counts,
-and unavailable Deployments without revealing raw Pod specifications, Secrets,
-logs, service-account tokens or allowing host shell / Kubernetes writes.
+**Pilot.** The tools are `whoami` (read) and `note_write` (scratch-only write),
+authenticated through an OAuth connection. The optional `k8s_overview` tool is
+opt-in and stays unregistered unless the operator configures it, together with a
+dedicated read-only RBAC, network policy and token projection in the deployment.
+It summarizes Node readiness, per-namespace Pod counts, and unavailable
+Deployments without revealing raw Pod specifications, Secrets, logs,
+service-account tokens or allowing host shell / Kubernetes writes.
 The exec tier remains disabled.
 
 ## Architecture
