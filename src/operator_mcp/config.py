@@ -68,6 +68,7 @@ class AuthConfig:
     client_id: str = ""
     required_group: str = "mcp-operators"
     exec_group: str = "mcp-exec"
+    workspace_group: str = "mcp-workspace"
     groups_claim: str = "groups"
     allowed_client_redirect_uris: list[str] = field(
         default_factory=lambda: list(DEFAULT_ALLOWED_CLIENT_REDIRECTS)
@@ -84,6 +85,7 @@ class AuditConfig:
 @dataclass(frozen=True)
 class ToolsConfig:
     exec_enabled: bool = False
+    workspace_enabled: bool = False
     scratch_dir: Path = Path("/var/lib/operator-mcp/scratch")
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
@@ -168,6 +170,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         client_id=_str(a.get("client_id", ""), "auth.client_id"),
         required_group=_str(a.get("required_group", "mcp-operators"), "auth.required_group"),
         exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
+        workspace_group=_str(a.get("workspace_group", "mcp-workspace"), "auth.workspace_group"),
         groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
@@ -181,6 +184,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
+        workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
         scratch_dir=_path(
             t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
         ),
@@ -189,6 +193,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     # check-config validates the opt-in before any server startup.
     validate_k8s_api_url(env.get("KULE_K8S_API_URL", ""))
+    validate_k8s_api_url(env.get("KULE_WORKSPACE_API_URL", ""))
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)
     return cfg
@@ -213,10 +218,11 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
     if not cfg.auth.groups_claim:
         raise ConfigError("auth.groups_claim must not be empty")
-    if not cfg.auth.required_group or not cfg.auth.exec_group:
-        raise ConfigError("auth.required_group and auth.exec_group must not be empty")
-    if cfg.auth.required_group == cfg.auth.exec_group:
-        raise ConfigError("auth.exec_group must differ from auth.required_group")
+    groups = (cfg.auth.required_group, cfg.auth.exec_group, cfg.auth.workspace_group)
+    if any(not group for group in groups):
+        raise ConfigError("auth role groups must not be empty")
+    if len(set(groups)) != 3:
+        raise ConfigError("auth role groups must differ")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
     if not 1 <= cfg.tools.timeout_seconds <= 110:
