@@ -198,9 +198,7 @@ def test_upstream_refresh_scope_preserves_client_scopes(
     cfg = replace(cfg, auth=replace(cfg.auth, oidc_config_url=oidc_discovery_url))
     proxy = build_auth(cfg)
     # Only the local synthetic IdP is contacted. No real login or bearer.
-    url = proxy._build_upstream_authorize_url(
-        "synthetic-transaction", {"scopes": requested}
-    )
+    url = proxy._build_upstream_authorize_url("synthetic-transaction", {"scopes": requested})
     params = parse_qs(urlsplit(url).query)
     assert params["scope"] == [expected]
     assert params["response_type"] == ["code"]
