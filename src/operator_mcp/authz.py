@@ -1,9 +1,10 @@
 """Deny-by-default, group-based authorization for tool tiers.
 
 Each tool carries exactly one tier tag. A caller may use a tier only if the
-token's groups claim contains the required group (and, for ``exec``, the exec
-group too, and exec is enabled in config). Tools without a tier tag are never
-callable.
+token's groups claim contains the required group. The ``exec`` tier also
+requires its own group and enablement flag. The separate ``workspace`` tier
+requires the workspace group and explicit enablement. Untagged tools are
+never callable.
 """
 
 from __future__ import annotations

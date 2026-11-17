@@ -13,7 +13,7 @@ The current runtime on 2026-11-17 is a **Coder-managed** workspace:
 
 ## Transport and scope
 
-Use the **already vendored** `containers/kubernetes-mcp-server` binary and
+Use the **digest-pinned upstream** `containers/kubernetes-mcp-server` binary and
 its `pods_exec` tool behind Kule's existing authenticated MCP listener.
 Do not publicly mount raw `pods_exec`. Kule's typed wrappers send only:
 `namespace=coder`, the **pinned** `KULE_WORKSPACE_POD`, `container=dev`,
@@ -25,7 +25,9 @@ A separate projected Kubernetes ServiceAccount token at
 `/var/run/kule-workspace/ca.crt` must be mounted **only in the Kule Pod**.
 The kubeconfig references `tokenFile`; token bytes are not copied.
 `KULE_WORKSPACE_API_URL` must be a TLS-verified Kubernetes API origin.
-`KULE_WORKSPACE_POD` must be an exact, observed Coder Pod name.
+`KULE_WORKSPACE_POD` must equal the separately reviewed
+`KULE_WORKSPACE_APPROVED_POD`; the latter is the exact Pod name in the
+namespace Role's `resourceNames`, not a general Coder name pattern.
 The upstream config is `contrib/kubernetes-workspace.toml`.
 
 The role design for an independent `yesvus/ops` PR is:
@@ -85,8 +87,11 @@ middleware timeout apply. Command strings and written file contents are
 
 Tools:
 - `workspace_exec(command)`: run in `dev` as its existing UID with
-  8-second process-group deadline, 8 KiB combined stdout/stderr bound,
-  no interactive stdin, and explicit exit code.
+  8-second process deadline, 8 KiB combined stdout/stderr bound,
+  no interactive stdin, explicit exit code and Linux subreaper cleanup
+  of remaining direct/detached child processes. Command return does not
+  leave a deliberately backgrounded process running. This is not a
+  hostile-code sandbox or a cgroup-level resource isolation guarantee.
 - `workspace_read(path)`: UTF-8, max 8 KiB, existing regular files under
   `/workspace`, rejects absolute/hidden/traversal paths and symlinks.
 - `workspace_write(path,text)`: max 8 KiB, existing parent directories
@@ -100,8 +105,10 @@ that. Ops #731 recorded a broad personal GitHub token and personal SSH
 credential inside Tezgah; these **must be remediated** before enabling
 workspace execution in a publicly reachable MCP gateway, or a differently
 credentialed isolated workspace container/transport must be provided.
-This design denies Kubernetes Secret API access but cannot promise denial
-of developer-local secrets. Never describe it as a secure arbitrary shell.
+Only the *Kule's projected workspace identity* is denied Kubernetes Secret
+API access. Commands in the existing Tezgah dev container may still use any
+Kubernetes identity or credential mounted there; they are not isolated from
+Tezgah-local secrets. Never describe it as a secure arbitrary shell.
 
 ## Acceptance and deployment gates
 

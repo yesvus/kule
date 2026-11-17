@@ -31,11 +31,14 @@ _MARKER = workspace_runner.MARKER
 
 
 def _target() -> tuple[str, str]:
-    api_url = validate_k8s_api_url(os.environ.get("KULE_WORKSPACE_API_URL", ""))
+    api_url = validate_k8s_api_url(
+        os.environ.get("KULE_WORKSPACE_API_URL", ""), "KULE_WORKSPACE_API_URL"
+    )
     pod = os.environ.get("KULE_WORKSPACE_POD", "")
-    if not api_url or not _POD_PATTERN.fullmatch(pod):
+    approved = os.environ.get("KULE_WORKSPACE_APPROVED_POD", "")
+    if not api_url or not _POD_PATTERN.fullmatch(pod) or pod != approved:
         raise RuntimeError(
-            "workspace requires an explicit Kubernetes API origin and pinned Coder Pod"
+            "workspace requires an explicit Kubernetes API origin and approved exact Coder Pod"
         )
     if not _TOKEN.is_file() or not _CA.is_file():
         raise RuntimeError("workspace-only projected ServiceAccount identity is not mounted")

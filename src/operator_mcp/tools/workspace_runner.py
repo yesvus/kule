@@ -7,6 +7,7 @@ The calling Kubernetes identity MUST additionally be restricted by resourceNames
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
 import selectors
@@ -117,18 +118,87 @@ def _write(path: str, text: str) -> dict:
         os.close(directory)
 
 
-def _kill(proc: subprocess.Popen[bytes]) -> None:
-    if proc.poll() is None:
+def _enable_subreaper() -> None:
+    """Adopt orphaned descendants, including children that call setsid.
+
+    Without this, a daemonizing shell command can escape killpg and outlive
+    the bounded MCP call. This is Linux-only and intentionally fails closed.
+    """
+    if not Path("/proc").is_dir():
+        raise RuntimeError("workspace exec requires Linux procfs")
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+        raise OSError(ctypes.get_errno(), "cannot enable workspace child subreaper")
+
+
+def _descendants() -> set[int]:
+    """Find runner descendants by PPid (rather than only their process group)."""
+    parents: dict[int, int] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdecimal():
+            continue
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
+            # /proc/PID/stat contains a parenthesized comm field (may include spaces).
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            parents[int(entry.name)] = int(fields[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    found: set[int] = set()
+    frontier = {os.getpid()}
+    while frontier:
+        children = {pid for pid, ppid in parents.items() if ppid in frontier and pid not in found}
+        found.update(children)
+        frontier = children
+    return found
+
+
+def _reap_adopted(exclude_pid: int) -> None:
+    """Do not reap the primary Popen child behind subprocess's back."""
+    for pid in _descendants():
+        if pid == exclude_pid:
+            continue
+        try:
+            os.waitpid(pid, os.WNOHANG)
+        except (ChildProcessError, ProcessLookupError):
             pass
-    proc.wait(timeout=2)
+
+
+def _terminate_descendants(proc: subprocess.Popen[bytes]) -> None:
+    """Always clean up direct and detached descendants, even after shell exit."""
+    # A command launched with a short deadline is not allowed to daemonize.
+    # PR_SET_CHILD_SUBREAPER ensures double-forked or setsid children remain
+    # visible to this dedicated runner after their parent exits.
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    for _ in range(16):
+        children = _descendants()
+        for pid in children:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        primary_exit = proc.poll()
+        _reap_adopted(proc.pid)
+        if not _descendants() and primary_exit is not None:
+            break
+        time.sleep(0.03)
+    try:
+        proc.wait(timeout=0.8)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("workspace process termination could not be confirmed") from None
+    _reap_adopted(proc.pid)
+    if _descendants():
+        raise RuntimeError("workspace process descendants remain after cleanup")
 
 
 def _exec(command: str) -> dict:
     if not command.strip() or len(command.encode()) > 4096 or "\x00" in command:
         raise ValueError("command must be 1..4096 bytes")
+    # This runner is a freshly exec'd python process in Tezgah, never the
+    # long-running Kule or Coder control plane process.
+    _enable_subreaper()
     proc = subprocess.Popen(  # noqa: S603 (intentional in-container dev-user exec)
         ["/bin/sh", "-c", command],
         cwd=ROOT,
@@ -143,27 +213,31 @@ def _exec(command: str) -> dict:
     exceeded = False
     deadline = time.monotonic() + MAX_SECONDS
     assert proc.stdout is not None
-    with selectors.DefaultSelector() as selector:
-        selector.register(proc.stdout, selectors.EVENT_READ)
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(proc.stdout, selectors.EVENT_READ)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    timed_out = True
+                    break
+                ready = selector.select(timeout=min(remaining, 0.2))
+                if not ready:
+                    continue
+                chunk = os.read(proc.stdout.fileno(), min(MAX_BYTES + 1 - len(output), 65536))
+                if not chunk:
+                    break
+                output.extend(chunk)
+                if len(output) > MAX_BYTES:
+                    exceeded = True
+                    break
+        if not timed_out and not exceeded:
+            try:
+                proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            except subprocess.TimeoutExpired:
                 timed_out = True
-                break
-            ready = selector.select(timeout=min(remaining, 0.2))
-            if not ready:
-                continue
-            chunk = os.read(proc.stdout.fileno(), min(MAX_BYTES + 1 - len(output), 65536))
-            if not chunk:
-                break
-            output.extend(chunk)
-            if len(output) > MAX_BYTES:
-                exceeded = True
-                break
-    if timed_out or exceeded:
-        _kill(proc)
-    else:
-        proc.wait(timeout=2)
+    finally:
+        _terminate_descendants(proc)
     return {
         "exit_code": proc.returncode,
         "stdout": output[:MAX_BYTES].decode("utf-8", "replace"),

@@ -134,17 +134,39 @@ class OperatorMiddleware(Middleware):
         return result
 
 
+def _audit_text_digest(value: Any, max_bytes: int) -> dict[str, Any]:
+    """Hash only bounded valid UTF-8 inputs; never allocate or persist huge values."""
+    if not isinstance(value, str) or len(value) > max_bytes:
+        return {"valid": False, "reason": "type-or-size"}
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeError:
+        return {"valid": False, "reason": "invalid-utf8"}
+    if len(encoded) > max_bytes:
+        return {"valid": False, "reason": "size"}
+    return {"valid": True, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
+
+
 def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Do not persist developer commands or file contents in audit records."""
+    """Record only bounded metadata for Tezgah calls, never commands or file bodies."""
     if tool == "workspace_exec":
-        command = str(args.get("command", ""))
+        metadata = _audit_text_digest(args.get("command"), 4096)
         return {
-            "command_bytes": len(command.encode()),
-            "command_sha256": hashlib.sha256(command.encode()).hexdigest(),
+            "command_bytes": metadata.get("bytes"),
+            "command_sha256": metadata.get("sha256"),
+            "command_valid": metadata["valid"],
         }
-    if tool == "workspace_write":
-        content = str(args.get("text", ""))
-        return {"path": args.get("path"), "text_bytes": len(content.encode())}
+    if tool in ("workspace_write", "workspace_read"):
+        metadata = _audit_text_digest(args.get("path"), 240)
+        result = {
+            "path_bytes": metadata.get("bytes"),
+            "path_sha256": metadata.get("sha256"),
+            "path_valid": metadata["valid"],
+        }
+        if tool == "workspace_write":
+            body = _audit_text_digest(args.get("text"), 8192)
+            result.update({"text_bytes": body.get("bytes"), "text_valid": body["valid"]})
+        return result
     return args
 
 

@@ -27,18 +27,18 @@ class ConfigError(ValueError):
     pass
 
 
-def validate_k8s_api_url(raw: str) -> str | None:
+def validate_k8s_api_url(raw: str, setting: str = "KULE_K8S_API_URL") -> str | None:
     """Return HTTPS-only API origin or None; reject empty query delimiters."""
     if not raw:
         return None
     if raw != raw.strip() or "?" in raw or "#" in raw:
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without query or fragment")
+        raise ConfigError(f"{setting} must be an HTTPS origin without query or fragment")
     base = raw.rstrip("/")
     try:
         parsed = urlsplit(base)
         port = parsed.port
     except ValueError:
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin") from None
+        raise ConfigError(f"{setting} must be an HTTPS origin") from None
     if (
         parsed.scheme != "https"
         or not parsed.hostname
@@ -48,7 +48,7 @@ def validate_k8s_api_url(raw: str) -> str | None:
         or parsed.path
         or (port is not None and not 1 <= port <= 65535)
     ):
-        raise ConfigError("KULE_K8S_API_URL must be an HTTPS origin without a path")
+        raise ConfigError(f"{setting} must be an HTTPS origin without a path")
     return base
 
 
@@ -68,13 +68,13 @@ class AuthConfig:
     client_id: str = ""
     required_group: str = "mcp-operators"
     exec_group: str = "mcp-exec"
-    workspace_group: str = "mcp-workspace"
     groups_claim: str = "groups"
     allowed_client_redirect_uris: list[str] = field(
         default_factory=lambda: list(DEFAULT_ALLOWED_CLIENT_REDIRECTS)
     )
     client_secret: str = field(default="", repr=False)
     jwt_signing_key: str = field(default="", repr=False)
+    workspace_group: str = "mcp-workspace"
 
 
 @dataclass(frozen=True)
@@ -85,10 +85,10 @@ class AuditConfig:
 @dataclass(frozen=True)
 class ToolsConfig:
     exec_enabled: bool = False
-    workspace_enabled: bool = False
     scratch_dir: Path = Path("/var/lib/operator-mcp/scratch")
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
+    workspace_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -193,7 +193,16 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     # check-config validates the opt-in before any server startup.
     validate_k8s_api_url(env.get("KULE_K8S_API_URL", ""))
-    validate_k8s_api_url(env.get("KULE_WORKSPACE_API_URL", ""))
+    workspace_api = validate_k8s_api_url(
+        env.get("KULE_WORKSPACE_API_URL", ""), "KULE_WORKSPACE_API_URL"
+    )
+    if tools.workspace_enabled:
+        if not workspace_api:
+            raise ConfigError("KULE_WORKSPACE_API_URL is required when workspace_enabled is true")
+        if not env.get("KULE_WORKSPACE_POD") or not env.get("KULE_WORKSPACE_APPROVED_POD"):
+            raise ConfigError("workspace requires pinned and approved Pod names")
+        if env["KULE_WORKSPACE_POD"] != env["KULE_WORKSPACE_APPROVED_POD"]:
+            raise ConfigError("KULE_WORKSPACE_POD differs from approved Pod")
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)
     return cfg

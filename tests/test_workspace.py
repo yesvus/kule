@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import sys
 
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from operator_mcp.authz import WORKSPACE, Policy
+from operator_mcp.middleware import _audit_arguments
 from operator_mcp.server import build_server
 from operator_mcp.tools import workspace, workspace_runner
 
@@ -19,7 +23,7 @@ def test_workspace_role_is_separate_from_global_exec():
     p = Policy(
         required_group="ops",
         exec_group="ops-exec",
-        exec_enabled=False,
+        exec_enabled=True,
         workspace_group="ops-workspace",
         workspace_enabled=True,
     )
@@ -73,6 +77,47 @@ def test_runner_exec_is_container_local_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(workspace_runner, "MAX_SECONDS", 0.15)
     timed = workspace_runner.run("exec", {"command": "sleep 5"})
     assert timed["timed_out"] is True
+    assert timed["exit_code"] != 0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux subreaper is required")
+def test_runner_reaps_closed_output_and_detached_session(tmp_path, monkeypatch):
+    monkeypatch.setattr(workspace_runner, "ROOT", tmp_path)
+    monkeypatch.setattr(workspace_runner, "MAX_SECONDS", 0.15)
+    result = workspace_runner.run("exec", {"command": "exec 1>&- 2>&-; sleep 5"})
+    assert result["timed_out"] is True
+    assert result["exit_code"] != 0
+    monkeypatch.setattr(workspace_runner, "MAX_SECONDS", 1.5)
+    pidfile = tmp_path / "daemon.pid"
+    code = (
+        "import subprocess;"
+        "p=subprocess.Popen(['sleep','20'], stdout=subprocess.DEVNULL,"
+        "stderr=subprocess.DEVNULL,start_new_session=True);"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))"
+    )
+    result = workspace_runner.run("exec", {"command": "python3 -c " + shlex.quote(code)})
+    assert result["exit_code"] == 0
+    assert pidfile.exists()
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pidfile.read_text()), 0)
+
+
+def test_bounded_audit_metadata_rejects_huge_and_invalid_utf8():
+    assert _audit_arguments("workspace_exec", {"command": "a" * 1_000_000}) == {
+        "command_bytes": None,
+        "command_sha256": None,
+        "command_valid": False,
+    }
+    assert _audit_arguments("workspace_exec", {"command": "\ud800"})["command_valid"] is False
+    assert (
+        _audit_arguments("workspace_write", {"path": ".config/secret", "text": "private"})[
+            "text_valid"
+        ]
+        is True
+    )
+    assert ".config/secret" not in str(
+        _audit_arguments("workspace_write", {"path": ".config/secret", "text": "private"})
+    )
 
 
 @pytest.mark.parametrize("bad", ["", "wrong", "coder-other-pod", "../coder-bad"])
@@ -85,6 +130,7 @@ def test_pod_pin_is_validated(monkeypatch, tmp_path, bad):
     monkeypatch.setattr(workspace, "_CA", ca)
     monkeypatch.setenv("KULE_WORKSPACE_API_URL", "https://127.0.0.1:6443")
     monkeypatch.setenv("KULE_WORKSPACE_POD", bad)
+    monkeypatch.setenv("KULE_WORKSPACE_APPROVED_POD", POD)
     with pytest.raises(RuntimeError):
         workspace._target()
 
@@ -101,6 +147,7 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
     monkeypatch.setattr(workspace, "_CONFIG", tmp_path / "kubeconfig")
     monkeypatch.setenv("KULE_WORKSPACE_API_URL", "https://127.0.0.1:6443")
     monkeypatch.setenv("KULE_WORKSPACE_POD", POD)
+    monkeypatch.setenv("KULE_WORKSPACE_APPROVED_POD", POD)
 
     requests = []
 
@@ -154,6 +201,33 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
     assert "credential-value-not-for-audit" not in audit
     assert "printf sensitive-value" not in audit
     assert "command_sha256" in audit
+
+
+def test_workspace_check_config_requires_target_and_reports_own_url(tmp_path):
+    from operator_mcp.config import ConfigError, load_config
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[server]\npublic_url = "https://mcp.example.com"\n'
+        '[auth]\noidc_config_url = "https://id.example.com/.well-known/openid-configuration"\n'
+        'client_id = "kule-test"\n'
+        "[tools]\nworkspace_enabled = true\n"
+    )
+    env = {
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "synthetic",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "x" * 40,
+    }
+    with pytest.raises(ConfigError, match="KULE_WORKSPACE_API_URL"):
+        load_config(config, env)
+    env["KULE_WORKSPACE_API_URL"] = "http://wrong.invalid"
+    with pytest.raises(ConfigError, match="KULE_WORKSPACE_API_URL"):
+        load_config(config, env)
+    env["KULE_WORKSPACE_API_URL"] = "https://127.0.0.1:6443"
+    with pytest.raises(ConfigError, match="approved Pod names"):
+        load_config(config, env)
+    env["KULE_WORKSPACE_POD"] = POD
+    env["KULE_WORKSPACE_APPROVED_POD"] = POD
+    assert load_config(config, env).tools.workspace_enabled is True
 
 
 def test_workspace_upstream_config_only_exposes_pods_exec():
