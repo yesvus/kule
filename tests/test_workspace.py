@@ -16,7 +16,15 @@ from operator_mcp.middleware import _audit_arguments
 from operator_mcp.server import build_server
 from operator_mcp.tools import workspace, workspace_runner
 
-POD = "coder-0267ee20-71a5-4b13-9917-bdf2a37c4c94-77895f6649-mxxv2"
+POD = "tezgah-7fd87c54-cr8dm"
+
+
+def test_workspace_target_is_current_tezgah_not_retired_coder():
+    assert workspace._NAMESPACE == "tezgah"
+    assert workspace._CONTAINER == "ssh"
+    assert workspace._POD_PATTERN.fullmatch(POD)
+    assert not workspace._POD_PATTERN.fullmatch("coder-0267ee20-oldpod")
+    assert not workspace._POD_PATTERN.fullmatch("tezgah-other-namespace")
 
 
 def test_workspace_role_is_separate_from_global_exec():
@@ -120,7 +128,7 @@ def test_bounded_audit_metadata_rejects_huge_and_invalid_utf8():
     )
 
 
-@pytest.mark.parametrize("bad", ["", "wrong", "coder-other-pod", "../coder-bad"])
+@pytest.mark.parametrize("bad", ["", "wrong", "coder-other-pod", "../tezgah-bad", "tezgah-bad"])
 def test_pod_pin_is_validated(monkeypatch, tmp_path, bad):
     token = tmp_path / "token"
     ca = tmp_path / "ca.crt"
@@ -164,6 +172,7 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
     mcp = build_server(cfg, claims_getter=claims)
     kubeconfig = json.loads((tmp_path / "kubeconfig").read_text())
     assert kubeconfig["users"][0]["user"]["tokenFile"] == str(token)
+    assert kubeconfig["contexts"][0]["context"]["namespace"] == "tezgah"
     assert "test-sa-only" not in (tmp_path / "kubeconfig").read_text()
 
     claims.value = {"sub": "viewer", "groups": ["ops"]}
