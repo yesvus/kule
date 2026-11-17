@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -101,6 +102,23 @@ class OperatorMiddleware(Middleware):
             # Keep the policy detail in the audit record, not in the response.
             raise AuthorizationError("not authorized")
 
+        if name.startswith("argocd_") and args.get("argocdBaseUrl") is not None:
+            # Validate BEFORE the normal call audit. The nested proxy also
+            # enforces the fixed origin, but it runs after this middleware.
+            from .tools.upstream_argocd import _url
+
+            supplied = args["argocdBaseUrl"]
+            try:
+                if not isinstance(supplied, str) or _url(supplied) != _url(
+                    os.environ.get("KULE_ARGOCD_BASE_URL", "")
+                ):
+                    raise ValueError("unapproved Argo endpoint")
+            except (RuntimeError, ValueError):
+                await self._audit(
+                    "denied", reason="Argo CD endpoint override", args=audit_args, **who
+                )
+                raise AuthorizationError("Argo CD endpoint override is not permitted") from None
+
         tier = self.policy.tier_of(tool.tags)
         await self._audit("call", tier=tier, args=audit_args, **who)
         start = time.monotonic()
@@ -148,7 +166,13 @@ def _audit_text_digest(value: Any, max_bytes: int) -> dict[str, Any]:
 
 
 def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Record only bounded metadata for Tezgah calls, never commands or file bodies."""
+    """Sanitize Argo origin overrides and hash bounded Tezgah arguments."""
+    if tool.startswith("argocd_"):
+        sanitized = dict(args)
+        sanitized.pop("argocdBaseUrl", None)
+        if "argocdBaseUrl" in args:
+            sanitized["argocd_base_url_override"] = True
+        return sanitized
     if tool == "workspace_exec":
         metadata = _audit_text_digest(args.get("command"), 4096)
         return {
