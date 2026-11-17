@@ -21,6 +21,7 @@ COPY --from=kubernetes-upstream /app/kubernetes-mcp-server /usr/local/bin/kubern
 # Exercise the pinned Go binary under each target architecture during CI build.
 RUN /usr/local/bin/kubernetes-mcp-server --version >/dev/null
 COPY contrib/kubernetes-upstream.toml /usr/local/share/kule/kubernetes-upstream.toml
+COPY contrib/kubernetes-workspace.toml /usr/local/share/kule/kubernetes-workspace.toml
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse operator-mcp \
     && rm -rf /wheelhouse
 USER 10001:10001
