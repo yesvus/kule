@@ -180,3 +180,56 @@ Please **critique, not endorse** the preference. Explicitly answer:
 - Authentik [OAuth2 provider](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/), [application bindings](https://docs.goauthentik.io/add-secure-apps/applications/manage_apps/), [service accounts](https://docs.goauthentik.io/users-sources/user/account-types/service-accounts/), [M2M authentication](https://docs.goauthentik.io/add-secure-apps/providers/oauth2/machine_to_machine/).
 - MCP [authorization documentation](https://modelcontextprotocol.io/specification/draft/basic/authorization) and resource/audience validation.
 - Internal source and issue links above are references to implementation **state**, not approval to deploy.
+
+## 11. Worked capability: Operator creates Cloudflare R2 bucket, scoped credentials and consumer delivery
+
+This is a **required end-to-end use case** for RFC review: the Operator should be able to say "Create a new R2 bucket for Birted, issue bucket-scoped application credentials, store them in OpenBao, and deliver them to Birted production," **without directly possessing or exposing Cloudflare master/issuer credentials**. Routine operations within a preapproved provider/account/resource namespace may execute autonomously; sensitive new trust/privilege scope or destructive changes require separate approval.
+
+### Separate three distinct privileges and systems
+
+1. **Resource management** — create/configure an R2 bucket using a Cloudflare credential with `Workers R2 Storage Write` (or provider equivalent) *only in the trusted executor*. Cloudflare's R2 bucket creation API is `POST /accounts/{account_id}/r2/buckets`. The existing `cf-r2-token-provisioner` token is recorded in [ops #889](https://github.com/yesvus/ops/issues/889) as **Account API Tokens Write only**; **it cannot be assumed to create buckets**, so this step needs a separately scoped R2 management principal. Verify real effective permissions before implementing.
+2. **Credential issuance** — after verifying the bucket actually exists and jurisdiction matches, a *separate* issuer principal creates an **account-owned R2 token restricted to the new bucket**, e.g. `Workers R2 Storage Bucket Item Write` (only if workload needs read/write/list; choose read-only if applicable). Cloudflare's API returns a one-time token `value` and token `id`; within trusted execution, produce S3 `ACCESS_KEY_ID = id` and `ACCESS_SECRET_KEY = SHA256(value)`. The exact provider-granted permissions and bucket resource encoding must be verified, not assumed from the issuer's `Account API Tokens Write` label. Consider Cloudflare temporary scoped R2 credentials for short-lived workloads; they expire (maximum 7 days) and are **not** a drop-in choice for a continuously running app without renewal.
+3. **Credential delivery** — issuer writes secret material **directly into OpenBao KVv2 from the same private process**, e.g. CAS=0 for a new version/path, with idempotency ledger/status metadata and no plaintext visible to Kule/LLM. ESO with scoped namespace `SecretStore` and `ExternalSecret` materializes a Kubernetes Secret for the authorized app. When a GitHub Environment/Cloudflare Worker is the consumer, use that destination's **approved encrypted/native secret mechanism** instead; ESO does not deliver directly into Cloudflare or GitHub.
+
+If the consumer is **a Cloudflare Worker using a native R2 binding**, it may **not need S3 credentials at all**; create/attach the binding rather than manufacturing unnecessary long-lived secrets.
+
+### Proposed typed Operator tools
+
+| Tool | Inputs (non-secret only) | Output |
+| --- | --- | --- |
+| `resource_plan` | approved provider/account, target app/env, bucket purpose, permitted name/jurisdiction, requested consumer permission | fixed-scope plan, cost/jurisdiction warnings, permission and delivery intent, missing grants |
+| `resource_apply` | immutable reviewed/approved plan or bounded preauthorized template + idempotency key | operation ID and metadata-only resource state |
+| `credential_status` | operation/profile ID | minted/escrowed/delivered/verified states, masked IDs, consumer, expiry, no values |
+| `credential_rotate` | existing approved profile + generation/reason | staged generation+delivery+consumer verification, prior-token revoke only after successful cutover |
+
+These should use existing `yesvus/ops` provider adapters and private on-demand execution. Prefer a **single declarative consumer plan/profile contract** covering bucket create + child issuance + escrow + destination, rather than hand-authored per-app scripts or building a new permanent orchestration service.
+
+A preapproved Operator scope may allow `create R2 bucket named birted-*` in one account/jurisdiction with only app-specific read/write tokens and designated target namespaces, so every normal bucket does not require manual intervention. A new account, wildcard IAM policy, broad issuer token, root OpenBao role, deletion, cross-project destination or unusual spend must be denied or separately authorized. Treat such policy templates as reviewed code/config; never accept arbitrary IAM JSON, OpenBao paths, environment name or delivery target from an LLM unchecked. A planned resource is **not** carte-blanche for unbounded account spend.
+
+### Reconciliation, ownership and failure handling
+
+- **Plan / validate:** determine exact consumer/app/env and whether it needs S3 credentials vs a native binding; check existing Cloudflare bucket, R2 billing/jurisdiction, OpenBao destination, current ESO owner and current target Secret. Distinguish creating infrastructure (potential Terraform/GitOps ownership) from merely issuing a credential; avoid unmanaged drift if the bucket is declared in Terraform. Record the intended declarative owner.
+- **Execute resource creation:** use management identity; verify provider resource ID/metadata. On retries, **reconcile** current bucket state before mutation. A bucket already created with unknown ownership is not automatically adopted.
+- **Issue credential:** use issuer identity with strict resource scope; on ambiguous provider timeout, inspect token metadata and OpenBao state before retrying; never mint duplicates blindly. Keep separate revocation ID.
+- **Escrow:** trusted executor stores S3 keys and endpoint/jurisdiction metadata in an approved, application-scoped OpenBao KV path using non-overwrite CAS for new material. No agent-readable raw values, error bodies, stdin/stdout or generic file export.
+- **Deliver:** an independently scoped delivery identity/ESO reads only that consumer path and projects exact keys to the intended namespace. GitOps should manage the `ExternalSecret` and native target owner; prevent concurrent SealedSecrets/ESO ownership or speculative automatic production sync. Refresh, pod rollout and target verification are separate steps.
+- **Verify:** metadata-only OpenBao/version and `ExternalSecret Ready/SecretSynced` (not secret bytes); safe consumer S3 smoke test (bucket-specific read/write/delete test object), optionally assert a different bucket is denied. Only then mark the operation `verified`.
+- **Rollback:** if issuance succeeded but escrow failed, revoke the new token if safely known; if uncertain, record an orphan and halt/reconcile. Do **not** delete the bucket or revoke a previously working credential as an automatic blanket rollback. Rotate as N→N+1 then consumer verification before revoking N.
+- **Audit:** actor's Authentik principal, approved plan/profile ID, Cloudflare resource IDs (safe metadata), GitOps change reference, executor job ID, OpenBao destination alias, delivery target and status; never secret values/hashes in responses.
+
+### Current implementation maturity and important dependencies
+
+- [ops #889](https://github.com/yesvus/ops/issues/889) records the **separate R2 issuer** as source-only design; existing `cf-r2-token-provisioner` is not an R2 bucket-management identity.
+- [ops #1030](https://github.com/yesvus/ops/issues/1030) contains multiple **merged source-only delivery components** and an inert Birted R2 g1 Job/profile, but the live end-to-end issuance→OpenBao→ESO→Birted success has **not been established**. There is no authorization to mint or rotate live provider credentials from this RFC alone.
+- [ops #1023](https://github.com/yesvus/ops/issues/1023) is the provider-agnostic issuer/delivery contract. #906 owns trusted OpenBao operator execution; #725 owns ESO controller and scoped SecretStore behavior.
+- Add to architecture review: **where should R2 bucket creation live**, given Terraform currently owns parts of Cloudflare infra? Recommend preventing a second uncontrolled writer. Ask whether to prefer reviewed GitOps/Terraform resource declaration with automated Operator PR/promotion, or a directly authorized bounded API-based provisioning class that reconciles into IaC as authoritative state.
+
+### Additional questions for Opus reviewer
+
+1. Does the separate resource-manager + issuer + delivery identity separation actually prevent an Operator MCP compromise from extracting master keys, or would the private executor need a stronger runtime boundary?
+2. Can trusted Operator autonomy be preserved with bounded preapproved resource creation templates **without** building a full controller/workflow engine? What is the smallest viable profile contract?
+3. How should Terraform/GitOps ownership, Cloudflare resource idempotency, CAS and ESO secret ownership fit in one non-transactional workflow? What is a credible rollback and recovery strategy?
+4. What proof is required that R2 token creation can be properly restricted to one bucket; what if the upstream issuer cannot delegate the desired narrow scope?
+5. Which workloads should use persistent account-owned bucket-scoped tokens vs short-lived temporary credentials or native Worker bindings?
+
+**Official references:** [Cloudflare R2 bucket creation API](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/methods/create/), [R2 authentication and API token S3 derivation](https://developers.cloudflare.com/r2/api/tokens/), [temporary access credentials](https://developers.cloudflare.com/api/resources/r2/subresources/temporary_credentials/methods/create/), [External Secrets Operator ExternalSecret lifecycle](https://external-secrets.io/latest/api/externalsecret/).
