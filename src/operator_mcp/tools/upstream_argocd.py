@@ -105,9 +105,6 @@ def mount(mcp: FastMCP, *, synthetic_backend: FastMCP | None = None) -> None:
     mcp.mount(proxy, namespace="argocd")
     mcp.add_transform(
         ToolTransform(
-            {
-                f"argocd_{name}": ToolTransformConfig(tags={"read"})
-                for name in _READ_TOOLS
-            }
+            {f"argocd_{name}": ToolTransformConfig(tags={"read"}) for name in _READ_TOOLS}
         )
     )
