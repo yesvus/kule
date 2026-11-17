@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 import os
 import shlex
@@ -247,3 +249,75 @@ def test_workspace_upstream_config_only_exposes_pods_exec():
     assert cfg["toolsets"] == ["core"]
     assert cfg["enabled_tools"] == ["pods_exec"]
     assert cfg["kubeconfig"] == "/tmp/kule-workspace-kubeconfig.json"
+
+
+async def test_developer_group_lists_only_workspace_and_call_time_denies_operator(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    token, ca = tmp_path / "token", tmp_path / "ca.crt"
+    token.write_text("synthetic-workspace-identity")
+    ca.write_text("synthetic-ca")
+    monkeypatch.setattr(workspace, "_TOKEN", token)
+    monkeypatch.setattr(workspace, "_CA", ca)
+    monkeypatch.setattr(workspace, "_CONFIG", tmp_path / "workspace-kubeconfig")
+    monkeypatch.setenv("KULE_WORKSPACE_API_URL", "https://127.0.0.1:6443")
+    monkeypatch.setenv("KULE_WORKSPACE_POD", POD)
+    monkeypatch.setenv("KULE_WORKSPACE_APPROVED_POD", POD)
+    calls = []
+
+    async def fake_invoke(pod, operation, payload, timeout):
+        calls.append((pod, operation))
+        return {"path": payload.get("path"), "text": "safe"}
+
+    monkeypatch.setattr(workspace, "_invoke", fake_invoke)
+    cfg = make_cfg(workspace_enabled=True, developer_enabled=True)
+    mcp = build_server(cfg, claims_getter=claims)
+
+    claims.value = {"sub": "dev-one", "groups": ["mcp-developers", "mcp-workspace"]}
+    async with Client(mcp) as client:
+        names = {tool.name for tool in await client.list_tools()}
+        assert names == {"workspace_exec", "workspace_read", "workspace_write"}
+        assert (await client.call_tool("workspace_read", {"path": "src/one.txt"})).data["text"] == "safe"
+        for forbidden, args in (
+            ("whoami", {}),
+            ("note_write", {"name": "denied", "text": "no"}),
+        ):
+            with pytest.raises(ToolError, match="not authorized"):
+                await client.call_tool(forbidden, args)
+
+    claims.value = {"sub": "dev-without-workspace", "groups": ["mcp-developers"]}
+    async with Client(mcp) as client:
+        assert await client.list_tools() == []
+        with pytest.raises(ToolError, match="not authorized"):
+            await client.call_tool("workspace_read", {"path": "src/one.txt"})
+
+    claims.value = {"sub": "operator-without-workspace", "groups": ["ops"]}
+    async with Client(mcp) as client:
+        assert {tool.name for tool in await client.list_tools()} == {"whoami", "note_write"}
+        with pytest.raises(ToolError, match="not authorized"):
+            await client.call_tool("workspace_read", {"path": "src/one.txt"})
+
+    assert calls == [(POD, "read")]
+    assert not (cfg.tools.scratch_dir / "denied.txt").exists()
+    audit = cfg.audit.path.read_text()
+    assert "denied" in audit
+    assert "mcp-developers" not in audit
+    assert "synthetic-workspace-identity" not in audit
+
+
+def test_developer_feature_flag_cannot_enable_without_workspace_settings(tmp_path):
+    from operator_mcp.config import ConfigError, load_config
+
+    file = tmp_path / "config.toml"
+    file.write_text(
+        '[server]\npublic_url = "https://mcp.example.com"\n'
+        '[auth]\noidc_config_url = "https://id.example.com/.well-known/openid-configuration"\n'
+        'client_id = "kule"\n'
+        '[tools]\ndeveloper_enabled = true\n'
+    )
+    env = {
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "synthetic",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 40,
+    }
+    with pytest.raises(ConfigError, match="developer_enabled requires workspace_enabled"):
+        load_config(file, env)
