@@ -82,10 +82,12 @@ def test_opt_in_developer_identity_can_only_use_workspace():
         developer_group="low-priv-dev",
         developer_enabled=True,
     )
-    c = policy.caller_from_claims({
-        "sub": "agent-low",
-        "groups": ["low-priv-dev", "workspace"],
-    })
+    c = policy.caller_from_claims(
+        {
+            "sub": "agent-low",
+            "groups": ["low-priv-dev", "workspace"],
+        }
+    )
     assert policy.allows(c, {"workspace"}) == (True, "ok")
     for tier in (READ, OPERATE, EXEC):
         assert policy.allows(c, {tier})[0] is False
@@ -110,9 +112,12 @@ def test_developer_gate_fails_closed_without_both_groups_and_feature_flag():
         assert active.allows(c, {"workspace"})[0] is False
     with_both = active.caller_from_claims({"sub": "agent", "groups": ["low-priv-dev", "workspace"]})
     assert Policy(**base, developer_enabled=False).allows(with_both, {"workspace"})[0] is False
-    assert Policy(**{**base, "workspace_enabled": False}, developer_enabled=True).allows(
-        with_both, {"workspace"}
-    )[0] is False
+    assert (
+        Policy(**{**base, "workspace_enabled": False}, developer_enabled=True).allows(
+            with_both, {"workspace"}
+        )[0]
+        is False
+    )
 
 
 def test_developer_gate_does_not_reduce_existing_operator_access():
