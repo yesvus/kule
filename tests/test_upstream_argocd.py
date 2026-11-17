@@ -35,6 +35,7 @@ def test_registry_single_endpoint_scoped_and_no_secret_in_errors(tmp_path):
     registry.write_text(json.dumps([{"baseUrl": endpoint, "token": secret}]))
     registry.chmod(0o440)
     upstream._check_registry(registry, endpoint)
+    registry.chmod(0o600)  # allow repeated writes as a non-root CI user
     for entries in (
         [{"baseUrl": "https://evil.example.test", "token": secret}],
         [{"baseUrl": endpoint, "token": ""}],
