@@ -181,14 +181,10 @@ async def test_redirect_denied_without_following_second_origin():
     assert visited == ["10.0.1.248"]
 
 
-async def test_inspection_opt_in_scope_projection_and_authorization(
-    make_cfg, claims, monkeypatch
-):
+async def test_inspection_opt_in_scope_projection_and_authorization(make_cfg, claims, monkeypatch):
     monkeypatch.setenv("KULE_K8S_API_URL", "https://10.0.1.248:6443")
     monkeypatch.setenv("KULE_K8S_INSPECT_ENABLED", "1")
-    monkeypatch.setattr(
-        kubernetes, "_TOKEN_PATH", SimpleNamespace(read_text=lambda: "test-token")
-    )
+    monkeypatch.setattr(kubernetes, "_TOKEN_PATH", SimpleNamespace(read_text=lambda: "test-token"))
     monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda **kwargs: True)
     paths = []
 
@@ -299,9 +295,7 @@ async def test_inspection_opt_in_scope_projection_and_authorization(
     async with Client(mcp) as client:
         assert await client.list_tools() == []
         with pytest.raises(ToolError):
-            await client.call_tool(
-                "k8s_crd_inspect", {"name": "pushsecrets.external-secrets.io"}
-            )
+            await client.call_tool("k8s_crd_inspect", {"name": "pushsecrets.external-secrets.io"})
     assert len(paths) == 3
 
 
