@@ -200,8 +200,9 @@ async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
             "client_id": registered["client_id"],
             "refresh_token": invalid_refresh,
         }
+        # Pinned FastMCP returns 401 for this invalid refresh grant.
         denied = await client.post("/token", data=form)
-        assert denied.status_code == 400
+        assert denied.status_code == 401
         assert denied.json()["error"] == "invalid_grant"
         assert "access_token" not in denied.json()
         assert invalid_refresh not in denied.text
@@ -210,7 +211,7 @@ async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
     # Do not re-register the client: a lost registration must fail this test.
     async with running_app(make_cfg, oidc_discovery_url, monkeypatch, tmp_path) as client:
         denied = await client.post("/token", data=form)
-        assert denied.status_code == 400
+        assert denied.status_code == 401
         assert denied.json()["error"] == "invalid_grant"
         assert "access_token" not in denied.json()
         assert invalid_refresh not in denied.text
