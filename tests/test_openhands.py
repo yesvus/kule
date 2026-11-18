@@ -48,7 +48,10 @@ def _assert_no_request(requests: list) -> None:
 
 @pytest.fixture
 def gateway(tmp_path, monkeypatch):
-    monkeypatch.setenv("KULE_OPENHANDS_WORKSPACE_ROOT", "/workspace/src")
+    monkeypatch.setenv(
+        "KULE_OPENHANDS_REPOSITORIES",
+        json.dumps({REPOSITORY: "/workspace/src/kule"}),
+    )
     claims = {"value": OPERATOR}
     audit = tmp_path / "audit.jsonl"
     mcp = FastMCP(
@@ -97,11 +100,36 @@ def test_text_message_validation_allows_an_omitted_run_flag():
     assert openhands._message_size({"content": [{"text": "x" * (32 * 1024 + 1)}]}) is None
 
 
-def test_repository_scope_normalizes_and_rejects_non_canonical_names():
-    assert openhands._repository("YesVus/Kule") == REPOSITORY
-    for value in ("", "kule", "a/b/c", "../kule", "yesvus/..", "yesvus /kule"):
+def test_repository_scope_requires_an_approved_exact_mapping():
+    approved = {REPOSITORY: "/workspace/src/kule"}
+    assert openhands._repository("YesVus/Kule", approved) == REPOSITORY
+    for value in (
+        "",
+        "kule",
+        "a/b/c",
+        "../kule",
+        "yesvus/..",
+        "yesvus /kule",
+        "yesvus/other",
+    ):
         with pytest.raises(AuthorizationError, match="repository target"):
-            openhands._repository(value)
+            openhands._repository(value, approved)
+
+    assert openhands._mapped_path("/workspace/src/kule") == "/workspace/src/kule"
+    valid = json.dumps({REPOSITORY: "/workspace/src/kule"})
+    assert openhands._repositories(valid) == {REPOSITORY: "/workspace/src/kule"}
+    for raw in (
+        "",
+        "[]",
+        "{}",
+        json.dumps({REPOSITORY: "relative"}),
+        json.dumps({REPOSITORY: "/"}),
+        json.dumps({REPOSITORY: "/workspace/src/../etc"}),
+        json.dumps({"bad": "/workspace/src/kule"}),
+        json.dumps({REPOSITORY: "/workspace/src/kule", "other/repo": "/workspace/src/kule"}),
+    ):
+        with pytest.raises(RuntimeError):
+            openhands._repositories(raw)
 
 
 def test_fixed_https_origin_and_service_key_validation():
@@ -126,10 +154,9 @@ def test_fixed_https_origin_and_service_key_validation():
             openhands._api_key(value)
         assert secret not in str(err.value)
 
-    assert openhands._workspace_root("/workspace/src/") == "/workspace/src"
     for value in ("", "workspace/src", "/", "/workspace\\src", "/workspace/\x00src"):
         with pytest.raises(RuntimeError):
-            openhands._workspace_root(value)
+            openhands._mapped_path(value)
 
 
 async def test_tools_are_explicitly_allowlisted_and_tiered(gateway):
@@ -217,13 +244,24 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
             for workspace in (
                 {"working_dir": "/workspace/other"},
                 {"working_dir": "/workspace/src/../etc"},
-                {"working_dir": "/workspace/src/kule", "kind": "LocalWorkspace"},
+                {"working_dir": "/workspace/src/kule/subdir"},
             ):
-                with pytest.raises(ToolError, match="workspace target"):
+                with pytest.raises(ToolError, match="approved repository path"):
                     await caller.call_tool(
                         "oh_start_conversation", {**start, "workspace": workspace}
                     )
-            for repository in ("not-a-repo", "a/b/c", "../repo"):
+            with pytest.raises(ToolError, match="workspace target"):
+                await caller.call_tool(
+                    "oh_start_conversation",
+                    {
+                        **start,
+                        "workspace": {
+                            "working_dir": "/workspace/src/kule",
+                            "kind": "LocalWorkspace",
+                        },
+                    },
+                )
+            for repository in ("not-a-repo", "a/b/c", "../repo", OTHER_REPOSITORY):
                 with pytest.raises(ToolError, match="repository target"):
                     await caller.call_tool(
                         "oh_start_conversation", {**start, "repository": repository}
@@ -311,6 +349,13 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                         "conversation_id": CONVERSATION,
                         "content": [{"type": "text", "text": "hello"}],
                     },
+                )
+            with pytest.raises(ToolError, match="repository target"):
+                await caller.call_tool("oh_list_conversations", {"repository": OTHER_REPOSITORY})
+            with pytest.raises(ToolError, match="repository target"):
+                await caller.call_tool(
+                    "oh_get_conversation",
+                    {"repository": OTHER_REPOSITORY, "conversation_id": CONVERSATION},
                 )
             with pytest.raises(ToolError, match="pagination"):
                 await caller.call_tool(

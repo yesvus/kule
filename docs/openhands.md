@@ -31,7 +31,7 @@ FastMCP 4.2.0 `FastMCP.from_openapi()` and reduces the upstream schema before mo
 | `KULE_OPENHANDS_ENABLED` | Must be exactly `1`; default off. |
 | `KULE_OPENHANDS_API_URL` | One fixed **HTTPS** origin, optional port, no path/query/userinfo. |
 | `KULE_OPENHANDS_API_KEY` | Dedicated Canvas service key, sent only as `X-Session-API-Key`. Never a browser cookie or shared operator credential. |
-| `KULE_OPENHANDS_WORKSPACE_ROOT` | Absolute POSIX root for launch targets; default `/workspace/src`. `/` is rejected. |
+| `KULE_OPENHANDS_REPOSITORIES` | JSON object mapping each approved canonical `owner/name` to its exact Canvas source path, for example `{"yesvus/kule":"/workspace/src/kule"}`. Required; 1–64 entries; no path root, `..`, duplicate name or duplicate path. |
 
 The HTTP client pins the origin, disables redirects and ignores proxy environment
 variables, so the service key cannot follow a redirect or an ambient proxy to another
@@ -74,7 +74,7 @@ has no repository filter, so this cannot be passed upstream:
 
 - `oh_start_conversation` requires `repository` and forces the native tag
   `kulerepo=owner/name`. A caller-supplied `kulerepo` with another value is rejected.
-  Issue, leg, task and model tags remain the worker's responsibility.
+  Issue, leg, task and model tags remain the session owner's responsibility.
 - `oh_list_conversations` passes pagination upstream, then returns only items whose
   native `tags.kulerepo` exactly matches the requested repository and preserves the
   upstream `next_page_id`. One bounded upstream page (maximum 100) per call; callers
@@ -87,17 +87,18 @@ has no repository filter, so this cannot be passed upstream:
 - `oh_count_conversations` is not exposed because the upstream count endpoint cannot
   be repository-scoped without global counting.
 
-LEG 2 owns worker filtering by issue, task, leg, model and status. This adapter only
+LEG 2 owns filtering by issue, task, leg, model and status. This adapter only
 enforces the repository boundary and exposes the scoped/native fields it needs; it
-does not add a second worker registry or database.
+does not add a second session registry or database.
 
 ### Launch request reduction
 
 `oh_start_conversation` accepts only:
 
-- `repository` — required canonical `owner/name`; enforced as `kulerepo`;
-- `workspace: {working_dir}` — required, normalized, and required to stay below
-  `KULE_OPENHANDS_WORKSPACE_ROOT`;
+- `repository` — required canonical `owner/name`; must be present in the approved
+  mapping and is enforced as `kulerepo`;
+- `workspace: {working_dir}` — required, normalized, and required to equal the exact
+  approved path for that repository; a sibling, parent or subdirectory is rejected;
 - `worktree` and `worktree_options` (`base`, `ref`, `branch_prefix`) — native Canvas
   worktree lifecycle, used instead of a second worktree manager;
 - `initial_message` — text-only, at most 32 blocks, 32 KiB per block, 64 KiB total;
@@ -121,30 +122,37 @@ dropped.
 
 - Kule's existing OAuth group and audit middleware remain the outer boundary.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
-- A call-time target guard validates the repository, conversation UUIDs, the workspace
-  root, worktree option shape, text-only messages, profile presence and model
-  identifier syntax before any action. Direct-ID actions also verify the native
-  `kulerepo` tag with a read-only preflight.
+- A call-time target guard validates the approved repository mapping, conversation
+  UUIDs, the exact repository path, worktree option shape, text-only messages, profile
+  presence and model identifier syntax before any action. Direct-ID actions also verify
+  the native `kulerepo` tag with a read-only preflight.
 - Audit metadata includes the requested repository. The repository tag is written by
   the adapter at launch; callers cannot silently relabel a conversation.
-- The shared HOME, UID and worktree are not a security boundary. The workspace-root
-  check is target authorization, not process isolation; Canvas and the worker profile
-  still govern what the agent can execute.
+- The shared HOME, UID and worktree are not a security boundary. The exact
+  repository-to-path mapping is target authorization, not process isolation; Canvas
+  and the selected agent profile still govern what the session can execute.
 - Audit records keep routing metadata such as conversation ID, workspace path, model
   and limit. Prompt/message bodies are replaced by block count, byte count and
   SHA-256 digest.
 
-## Leg 2 integration interface
+## Session lifecycle interface for Leg 2
 
-A worker dispatcher can use only these tools:
+The public MCP abstraction is a **session** (a native Canvas conversation). "Worker"
+is a LEG 2 policy concept layered on a session; worktree and PR are optional session
+attributes, not additional public lifecycle verbs. Kule must expose one lifecycle API:
+these `oh_*` tools. LEG 2 should call them rather than add a second public
+start/status/interrupt implementation; it may add task, issue, model, worktree and PR
+policy around them.
+
+A session dispatcher can use only these tools:
 
 1. `oh_list_agent_profiles` to resolve the exact ACP profile ID and its advertised
    model. Do not substitute a paid model silently.
-2. `oh_start_conversation` with `repository`, `workspace.working_dir` set to the task
-   repository, `worktree: true`, the task branch prefix (for example
-   `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and optionally a bounded
-   initial task message. The response returns the real native conversation ID. Supply
-   the worker's `kuleissue`/`kuletask`/`kulemodel` tags as appropriate.
+2. `oh_start_conversation` with `repository`, `workspace.working_dir` set to that
+   repository's exact approved path, `worktree: true`, the task branch prefix (for
+   example `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and optionally a
+   bounded initial task message. The response returns the real native conversation
+   ID. Supply the session's `kuleissue`/`kuletask`/`kulemodel` tags as appropriate.
 3. If an exact per-conversation model override is required,
    `oh_switch_acp_model(repository, conversation_id, model)` with the verified catalog
    ID. The stored profile is unchanged.
@@ -159,7 +167,7 @@ A worker dispatcher can use only these tools:
    cancellation and timeout handling.
 
 Leg 2 remains responsible for duplicate-dispatch handling, bounded concurrency,
-branch/worktree mapping, issue/leg/task/model filtering and verifying the worker's
+branch/worktree mapping, issue/leg/task/model filtering and verifying the session's
 actual branch, commit, CI and PR. This adapter only enforces repository scope and
 returns what Canvas reports.
 
@@ -178,7 +186,7 @@ management endpoints:
 It is not part of the Canvas port 8000 schema and its generated OpenAPI declares no
 security scheme; it uses separate service-key/permission dependencies. Its live base
 URL, identity and deployment contract have not been verified. It is therefore not
-mounted here. Direct conversation dispatch is the preferred path for ad hoc workers;
+mounted here. Direct conversation dispatch is the preferred path for ad hoc sessions;
 scheduled/webhook automation needs a separate reviewed fixture and credential in a
 later change. Never reuse the Canvas key for that service.
 
@@ -188,7 +196,7 @@ later change. Never reuse the Canvas key for that service.
   Canvas service identity without changing the live gateway.
 - Add a NetworkPolicy allowing only Kule to the Canvas management port; keep the API
   key out of Git, logs and prompts.
-- Resolve #731 credential isolation before dispatching code-executing workers into the
+- Resolve #731 credential isolation before dispatching code-executing sessions into the
   shared HOME trust domain.
 - Exercise the allowlist, denial paths, cancellation, audit digest and a disposable
   conversation end to end. No merge, deployment, cluster mutation or production change

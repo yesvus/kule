@@ -39,7 +39,6 @@ from ..authz import OPERATE, READ
 
 _SPEC = Path(__file__).resolve().parent.parent / "openapi" / "openhands-1.62.0.json"
 _SPEC_VERSION = "1.62.0"
-_DEFAULT_WORKSPACE_ROOT = "/workspace/src"
 _API_KEY_HEADER = "X-Session-API-Key"
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _REPOSITORY = re.compile(r"^(?!\.{1,2}/)(?!.*/\.{1,2}$)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -231,13 +230,43 @@ def _api_key(raw: str) -> str:
     return raw
 
 
-def _workspace_root(raw: str) -> str:
-    if not raw or not raw.startswith("/") or "\x00" in raw or "\\" in raw:
-        raise RuntimeError("KULE_OPENHANDS_WORKSPACE_ROOT must be an absolute POSIX path")
-    root = posixpath.normpath(raw)
-    if root == "/" or root == "//" or not root.startswith("/"):
-        raise RuntimeError("KULE_OPENHANDS_WORKSPACE_ROOT must not be the filesystem root")
-    return root
+def _mapped_path(value: Any) -> str:
+    if not isinstance(value, str) or not value.startswith("/") or len(value) > 1024:
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES paths must be absolute POSIX paths")
+    if (
+        "\x00" in value
+        or "\\" in value
+        or any(part in {"", ".", ".."} for part in value.split("/")[1:])
+    ):
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES paths must be normalized")
+    normal = posixpath.normpath(value)
+    if normal == "/" or normal == "//" or not normal.startswith("/"):
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must not map to the filesystem root")
+    return normal
+
+
+def _repositories(raw: str) -> dict[str, str]:
+    """Require an exact approved owner/name -> Canvas source path mapping."""
+    if not raw or len(raw) > 16384:
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must be a non-empty JSON object")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must be valid JSON") from None
+    if not isinstance(data, dict) or not 1 <= len(data) <= 64:
+        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must map 1 to 64 repositories")
+    approved: dict[str, str] = {}
+    paths: set[str] = set()
+    for name, value in data.items():
+        if not isinstance(name, str) or not _REPOSITORY.fullmatch(name):
+            raise RuntimeError("KULE_OPENHANDS_REPOSITORIES has an invalid repository")
+        repository = name.lower()
+        path = _mapped_path(value)
+        if repository in approved or path in paths:
+            raise RuntimeError("KULE_OPENHANDS_REPOSITORIES has a duplicate scope")
+        approved[repository] = path
+        paths.add(path)
+    return approved
 
 
 @lru_cache(maxsize=1)
@@ -417,11 +446,14 @@ def _conversation_id(value: Any) -> str:
         raise AuthorizationError("OpenHands conversation target is not permitted") from None
 
 
-def _repository(value: Any) -> str:
+def _repository(value: Any, approved: dict[str, str]) -> str:
     if not isinstance(value, str) or len(value) > 150 or not _REPOSITORY.fullmatch(value):
         raise AuthorizationError("OpenHands repository target is not permitted")
     # GitHub owner/name scope is case-insensitive; keep one native tag value.
-    return value.lower()
+    repository = value.lower()
+    if repository not in approved:
+        raise AuthorizationError("OpenHands repository target is not permitted")
+    return repository
 
 
 def _event_id(value: Any) -> None:
@@ -487,9 +519,9 @@ def audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 class _TargetGuard(Middleware):
     """Enforce repository scope and safe launch targets before any HTTP call."""
 
-    def __init__(self, client: httpx2.AsyncClient, workspace_root: str) -> None:
+    def __init__(self, client: httpx2.AsyncClient, repositories: dict[str, str]) -> None:
         self.client = client
-        self.workspace_root = workspace_root
+        self.repositories = repositories
 
     async def on_call_tool(self, context, call_next):
         name = context.message.name
@@ -498,12 +530,12 @@ class _TargetGuard(Middleware):
 
         if name == "start_conversation":
             self._start(arguments)
-            repository = _repository(arguments.pop("repository"))
+            repository = self._repository(arguments.pop("repository"))
             tags = dict(arguments.get("tags") or {})
             tags["kulerepo"] = repository
             arguments["tags"] = tags
         elif name == "list_conversations":
-            repository = _repository(arguments.pop("repository", None))
+            repository = self._repository(arguments.pop("repository", None))
             self._pagination(arguments)
         elif name == "send_message":
             repository, conversation_id = self._scope(
@@ -559,11 +591,13 @@ class _TargetGuard(Middleware):
             if page_id is not None and (not isinstance(page_id, str) or len(page_id) > 1024):
                 raise AuthorizationError("OpenHands pagination is not permitted")
 
-    @staticmethod
-    def _scope(arguments: dict[str, Any], allowed: set[str]) -> tuple[str, str]:
+    def _repository(self, value: Any) -> str:
+        return _repository(value, self.repositories)
+
+    def _scope(self, arguments: dict[str, Any], allowed: set[str]) -> tuple[str, str]:
         if set(arguments) - allowed:
             raise AuthorizationError("OpenHands conversation scope is not permitted")
-        repository = _repository(arguments.pop("repository", None))
+        repository = self._repository(arguments.pop("repository", None))
         conversation_id = _conversation_id(arguments.get("conversation_id"))
         return repository, conversation_id
 
@@ -588,16 +622,17 @@ class _TargetGuard(Middleware):
     def _start(self, arguments: dict[str, Any]) -> None:
         if set(arguments) - _START_FIELDS:
             raise AuthorizationError("OpenHands launch field is not permitted")
-        repository = _repository(arguments.get("repository"))
+        repository = self._repository(arguments.get("repository"))
         workspace = arguments.get("workspace")
         if not isinstance(workspace, dict) or set(workspace) != {"working_dir"}:
             raise AuthorizationError("OpenHands workspace target is not permitted")
         working_dir = workspace.get("working_dir")
         if not isinstance(working_dir, str) or len(working_dir) > 1024 or "\x00" in working_dir:
             raise AuthorizationError("OpenHands workspace target is not permitted")
-        normal = posixpath.normpath(working_dir)
-        if not normal.startswith(self.workspace_root + "/"):
-            raise AuthorizationError("OpenHands workspace target is outside the approved root")
+        if posixpath.normpath(working_dir) != self.repositories[repository]:
+            raise AuthorizationError(
+                "OpenHands workspace target does not match the approved repository path"
+            )
 
         worktree = arguments.get("worktree", False)
         if not isinstance(worktree, bool):
@@ -696,7 +731,7 @@ def mount(
     timeout_seconds: float = 20.0,
 ) -> None:
     """Mount the reviewed Canvas management tools; client injection is for tests."""
-    root = _workspace_root(os.environ.get("KULE_OPENHANDS_WORKSPACE_ROOT", _DEFAULT_WORKSPACE_ROOT))
+    repositories = _repositories(os.environ.get("KULE_OPENHANDS_REPOSITORIES", ""))
     lifespan = None
     if client is None:
         origin = _origin(os.environ.get("KULE_OPENHANDS_API_URL", ""))
@@ -718,7 +753,7 @@ def mount(
         strict_input_validation=True,
         lifespan=lifespan,
     )
-    backend.add_middleware(_TargetGuard(client, root))
+    backend.add_middleware(_TargetGuard(client, repositories))
     # Parent middleware gates tools, not arbitrary upstream resources/prompts.
     backend.disable(components={"resource", "template", "prompt"})
     mcp.mount(backend, namespace="oh")
