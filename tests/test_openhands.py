@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import threading
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import httpx2
@@ -965,8 +968,12 @@ async def test_truncated_listing_returns_a_resumable_opaque_cursor(gateway):
             assert first.data["truncated"] is True
             cursor = first.data["next_page_id"]
             assert cursor is not None and cursor.startswith("gc1.")
+            payload = base64.urlsafe_b64decode(cursor.split(".", 2)[2] + "==")
             for conversation_id in excluded:
                 assert conversation_id not in cursor
+                assert conversation_id.encode("ascii") not in payload
+                assert conversation_id.replace("-", "").encode("ascii") not in payload
+                assert uuid.UUID(conversation_id).bytes not in payload
             second = await caller.call_tool(
                 "oh_list_conversations",
                 {"repository": REPOSITORY, "page_id": cursor},
@@ -1089,6 +1096,55 @@ async def test_inbound_mcp_headers_cannot_override_the_canvas_key(gateway, monke
 
     assert seen["x-session-api-key"] == "dedicated-service-key"
     assert "x-openhands-observability-tags" not in seen
+
+
+async def test_scoped_client_rebuilds_body_framing_for_a_real_connection():
+    seen: dict[str, object] = {}
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length", "0"))
+            seen["headers"] = dict(self.headers)
+            seen["body"] = self.rfile.read(length)
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    client = openhands._ScopedClient(
+        base_url=f"http://127.0.0.1:{server.server_address[1]}",
+        api_key="dedicated-service-key",
+        timeout=5,
+    )
+    try:
+        response = await client.post(
+            "/api/conversations",
+            json={"title": "session"},
+            headers={
+                "Host": "caller.example.test",
+                "Content-Length": "999",
+                "Transfer-Encoding": "chunked",
+                "X-Session-API-Key": "caller-controlled-key",
+            },
+        )
+    finally:
+        await client.aclose()
+        server.shutdown()
+        server.server_close()
+
+    assert response.status_code == 200
+    headers = seen["headers"]
+    assert headers["Host"] == f"127.0.0.1:{server.server_address[1]}"
+    assert headers["Content-Length"] == str(len(seen["body"]))
+    assert "Transfer-Encoding" not in headers
+    assert headers["X-Session-API-Key"] == "dedicated-service-key"
+    assert seen["body"] == b'{"title":"session"}'
 
 
 async def test_lifespan_factory_is_callable_and_closes_the_owned_client():

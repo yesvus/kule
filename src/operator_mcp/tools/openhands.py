@@ -520,6 +520,22 @@ class _ScopedClient(httpx2.AsyncClient):
         for name in tuple(request.headers.keys()):
             if name.lower() not in _ALLOWED_REQUEST_HEADERS:
                 del request.headers[name]
+        # Rebuild framing from the configured URL and the serialized body.
+        # Inbound Host, Content-Length and Transfer-Encoding are never trusted.
+        host = request.url.host
+        port = request.url.port
+        default_port = 443 if request.url.scheme == "https" else 80
+        if port is not None and port != default_port:
+            host = f"{host}:{port}"
+        request.headers["Host"] = host
+        try:
+            body = request.content
+        except httpx2.RequestNotRead:
+            body = None
+        if body is None:
+            request.headers.pop("Content-Length", None)
+        else:
+            request.headers["Content-Length"] = str(len(body))
         if self._canvas_api_key is not None:
             # Re-apply after filtering: FastMCP may add inbound MCP headers to
             # the built request, including a caller-controlled session key.

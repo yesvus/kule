@@ -171,11 +171,13 @@ cannot rewrite tags, budgets or other metadata. Unknown or extra arguments fail
 closed rather than being silently dropped.
 
 FastMCP merges inbound MCP HTTP headers into the outbound Canvas request. The adapter
-therefore sends only a fixed header allowlist of normal transport headers and re-applies
-the configured service key after filtering. Caller-supplied
-`X-OpenHands-Observability-Tags`, `X-Session-API-Key`, `Authorization`, `Cookie`,
-tracing headers and similar values are removed or replaced before the request leaves
-the gateway, so an inbound header cannot override the Canvas credential.
+therefore sends only a fixed header allowlist of normal transport headers, rebuilds
+`Host` and `Content-Length` from the configured URL and the serialized body, and
+re-applies the configured service key after filtering. Caller-supplied
+`X-OpenHands-Observability-Tags`, `X-Session-API-Key`, `Host`, `Content-Length`,
+`Transfer-Encoding`, `Authorization`, `Cookie`, tracing headers and similar values
+are removed or replaced before the request leaves the gateway, so an inbound header
+cannot override the Canvas credential or the request framing.
 `oh_interrupt_conversation` is the native stop operation; `oh_pause_conversation` is
 the cooperative alternative.
 
