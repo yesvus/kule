@@ -1045,6 +1045,10 @@ class WorkerClient:
             if exc.status_code == 201:
                 await self._safe_interrupt(task.conversation_id)
             raise
+        except WorkerError:
+            if request_started:
+                await self._reconcile_created(task, repo_path)
+            raise
         if status not in (200, 201):
             raise WorkerError(f"unexpected OpenHands start status {status}")
 

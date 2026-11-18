@@ -2,6 +2,10 @@
 
 **Status: source-only; no live worker was dispatched and no production change is implied.** The module is not registered as a Kule MCP tool. LEG 1 owns the general Canvas session API in #27; this module is the worker-specific specialization and does not duplicate that public lifecycle.
 
+## Relationship to #27
+
+#27 is the public, repository-scoped Canvas adapter: it owns the MCP tools, operation allowlist, OAuth/audit boundary and general conversation lifecycle. This module owns only the worker-specific parts: task brief, native worktree identity, exact model/effort selection, start/status mapping, PR/blocker evidence and branch checks. It adds no MCP tool, route, queue or second conversation store. When #27 lands, its repository-scoped session operations can back this helper; do not expose a second public list/get/start surface from this module.
+
 ## What this adds
 
 `src/operator_mcp/worker_workflow.py` creates a native OpenHands conversation in two phases: first without the task, then after the worktree/model/effort have been verified, it submits the task. It does not add a runtime, queue, conversation database, scheduler or worktree manager.
