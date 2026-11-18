@@ -75,6 +75,7 @@ class AuthConfig:
     client_secret: str = field(default="", repr=False)
     jwt_signing_key: str = field(default="", repr=False)
     workspace_group: str = "mcp-workspace"
+    developer_group: str = "mcp-developers"
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class ToolsConfig:
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
     workspace_enabled: bool = False
+    developer_enabled: bool = False
 
 
 @dataclass(frozen=True)
@@ -171,6 +173,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         required_group=_str(a.get("required_group", "mcp-operators"), "auth.required_group"),
         exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
         workspace_group=_str(a.get("workspace_group", "mcp-workspace"), "auth.workspace_group"),
+        developer_group=_str(a.get("developer_group", "mcp-developers"), "auth.developer_group"),
         groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
@@ -185,6 +188,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
         workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
+        developer_enabled=_bool(t.get("developer_enabled", False), "tools.developer_enabled"),
         scratch_dir=_path(
             t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
         ),
@@ -209,6 +213,8 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 
 
 def validate(cfg: Config) -> None:
+    if cfg.tools.developer_enabled and not cfg.tools.workspace_enabled:
+        raise ConfigError("developer_enabled requires workspace_enabled")
     if not 1 <= cfg.server.port <= 65535:
         raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
@@ -227,10 +233,15 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
     if not cfg.auth.groups_claim:
         raise ConfigError("auth.groups_claim must not be empty")
-    groups = (cfg.auth.required_group, cfg.auth.exec_group, cfg.auth.workspace_group)
+    groups = (
+        cfg.auth.required_group,
+        cfg.auth.exec_group,
+        cfg.auth.workspace_group,
+        cfg.auth.developer_group,
+    )
     if any(not group for group in groups):
         raise ConfigError("auth role groups must not be empty")
-    if len(set(groups)) != 3:
+    if len(set(groups)) != 4:
         raise ConfigError("auth role groups must differ")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
