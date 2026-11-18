@@ -261,6 +261,7 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
         "scope": "openid profile offline_access",
     }
 
+    monkeypatch.setenv("FASTMCP_HOME", str(cfg.server.state_dir / "fastmcp"))
     proxy = build_auth(cfg)
     async with running_app(
         make_cfg, oidc_discovery_url, monkeypatch, tmp_path, auth=proxy
