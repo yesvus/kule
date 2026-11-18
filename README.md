@@ -8,13 +8,13 @@ It does not replace existing break-glass or remote management tools.
 
 ## Status
 
-**Current live pilot**: `whoami` (read) and `note_write` (scratch-only write)
-are authenticated through ChatGPT's OAuth connection. The optional
-`k8s_overview` tool in this PR is **source-only** until the companion
-`yesvus/ops` RBAC/network/token projection and a reviewed image digest are
-explicitly deployed. It summarizes Node readiness, per-namespace Pod counts,
-and unavailable Deployments without revealing raw Pod specifications, Secrets,
-logs, service-account tokens or allowing host shell / Kubernetes writes.
+**Pilot.** The tools are `whoami` (read) and `note_write` (scratch-only write),
+authenticated through an OAuth connection. The optional `k8s_overview` tool is
+opt-in and stays unregistered unless the operator configures it, together with a
+dedicated read-only RBAC, network policy and token projection in the deployment.
+It summarizes Node readiness, per-namespace Pod counts, and unavailable
+Deployments without revealing raw Pod specifications, Secrets, logs,
+service-account tokens or allowing host shell / Kubernetes writes.
 The exec tier remains disabled.
 
 ## Architecture
@@ -136,32 +136,44 @@ provider on loopback, so it needs no network access.
 
 Apache License 2.0. See [LICENSE](LICENSE).
 
-## k3s dual-client pilot (ops #461)
+## Deployment notes
 
-The deployment definitions and approval gates live in [yesvus/ops](https://github.com/yesvus/ops) under
-`cluster/operator-mcp-pilot/`. The owner-approved OAuth/MCP gateway is live at
-`https://mcp.yesvus.com/mcp`. Real ChatGPT DCR/OAuth and both pilot tools
-have been verified. Kubernetes access is a separate reviewed rollout.
+Guidance for exposing the server to hosted MCP clients such as ChatGPT and Claude.ai.
+Deployment manifests, approval gates and hostnames belong in your own infrastructure
+repository, not here.
 
-- ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check
-  the exact callback selected by the ChatGPT plugin builder; write-tool support
-  must be proven on the **actual account**.
-- Claude.ai: prefer its published client identity when compatible; otherwise
-  choose automatic registration, with an exact fallback callback
-  `https://claude.ai/api/mcp/auth_callback`. Never permit a wildcard Claude domain.
-- The FastMCP OAuth storage backend must be explicitly verified on Linux.
-  A data directory alone does **not** prove that DCR registrations survive
-  process restarts. Reconnect/re-register and token lifecycle are acceptance tests.
-- Scratch notes, audit records and the kill switch use an isolated volume.
-  Audits redact secrets best-effort; they must not be treated as durable external
-  evidence until exported to the logging pipeline.
-- The currently deployed pilot contains no developer-agent credentials,
-  Docker socket, host paths, kubeconfig, service-account token or host tools.
-  An optional read-only Kubernetes observer would require a dedicated,
-  short-lived projected ServiceAccount identity in a separate rollout;
-  its token must never appear in tool output or audit logs.
+**Before exposing the endpoint**
 
-## Optional Kubernetes read-only overview (NOT LIVE until separate GitOps rollout)
+- Require a fresh, MFA-backed login at your identity provider.
+- Deploy a verified image, pinned by digest.
+- Review the route that publishes the endpoint, and keep it unpublished until that passes.
+
+**Client registration**
+
+- ChatGPT: dynamic client registration with only the documented redirect URI patterns.
+  Check the exact callback the ChatGPT plugin builder selects, and confirm write-tool
+  support on the account you will actually use.
+- Claude.ai: prefer its published client identity when compatible. Otherwise use
+  automatic registration with the exact callback
+  `https://claude.ai/api/mcp/auth_callback`. Never allow a wildcard Claude domain.
+
+**State and persistence**
+
+- Verify the FastMCP OAuth storage backend on your target platform. A data directory
+  alone does not prove that dynamic registrations survive a process restart. Test
+  reconnect/re-registration and the token lifecycle as acceptance criteria.
+- Keep scratch notes, audit records and the kill switch on an isolated volume.
+- Audit redaction is best-effort. Export audit records to a logging pipeline before
+  treating them as durable evidence.
+
+**Out of scope**
+
+By default the server runs without developer-agent credentials, a container runtime
+socket, host paths, kubeconfig, service-account tokens or host-operation tools. Do not
+mount or grant any of these. The only exception is the optional read-only Kubernetes
+overview below, which uses its own dedicated, short-lived ServiceAccount identity.
+
+## Optional Kubernetes read-only overview (opt-in)
 
 `k8s_overview` is registered **only** when the operator explicitly supplies
 `KULE_K8S_API_URL` (for example,
@@ -179,13 +191,11 @@ ServiceAccount token and the cluster CA at `/var/run/kule-k8s/token` and
 No `get secrets`, `pods/log`, `pods/exec`, mutating verbs or
 `cluster-admin`. NetworkPolicy allows exactly
 the explicitly configured control-plane private endpoint on TCP 6443;
-the cluster CA validates the Kubernetes API certificate. Private IP,
-network-test outcomes and runtime admission evidence belong in the ops
-workstream, rather than this public code README.
+the cluster CA validates the Kubernetes API certificate. Keep environment-specific
+details such as private IPs and network-test results out of this public README.
 
-Enabling this source alone does **not** restart the running MCP Pod, update
-its publicly available tools, change RBAC, or authorize a rollout.
-The independent GitOps PR must pass exact-head review, RBAC
-`kubectl auth can-i` negatives and the live disposable token read
-before replacing the existing digest. SentinelX remains available for
-break-glass until the Kule operator functionality is independently tested.
+Enabling this feature in code alone does **not** change RBAC or the running
+deployment. Roll it out separately: review the exact manifests, verify with
+`kubectl auth can-i` that forbidden verbs are denied, and test a live read with a
+disposable token before replacing the deployed image. Keep your existing break-glass
+tooling available until the feature has been independently tested.
