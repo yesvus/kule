@@ -245,6 +245,7 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
     import base64
     import hashlib
     import time
+
     from fastmcp.server.auth.oauth_proxy.models import ClientCode
 
     base = make_cfg()
@@ -389,7 +390,8 @@ async def _assert_refresh_rotation(cfg, initial_upstream, client_id, issued):
             assert again.status_code == 200
             assert upstream.refresh_token.await_count == 2
             assert (
-                upstream.refresh_token.await_args.kwargs["refresh_token"] == "synthetic-idp-refresh-2"
+                upstream.refresh_token.await_args.kwargs["refresh_token"]
+                == "synthetic-idp-refresh-2"
             )
             assert again.json()["refresh_token"] != rotated["refresh_token"]
             assert again.json()["refresh_token"] != "synthetic-idp-refresh-3"
