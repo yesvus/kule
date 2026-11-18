@@ -888,16 +888,23 @@ async def test_list_guard_rejects_unstable_sort_order():
 
     class _Message:
         name = "list_conversations"
-        arguments = {"repository": REPOSITORY, "sort_order": "UPDATED_AT"}
+
+        def __init__(self, arguments: dict) -> None:
+            self.arguments = arguments
 
     class _Context:
-        message = _Message()
+        def __init__(self, message: _Message) -> None:
+            self.message = message
 
     async def _unreachable(_context):
         raise AssertionError("the upstream request must not run")
 
-    with pytest.raises(AuthorizationError, match="sort order"):
-        await guard.on_call_tool(_Context(), _unreachable)
+    for sort_order in ("UPDATED_AT", ["CREATED_AT"], {"CREATED_AT": True}):
+        with pytest.raises(AuthorizationError, match="sort order"):
+            await guard.on_call_tool(
+                _Context(_Message({"repository": REPOSITORY, "sort_order": sort_order})),
+                _unreachable,
+            )
 
 
 def test_launch_checkout_is_bound_to_the_approved_repository_mapping():

@@ -828,7 +828,10 @@ class _TargetGuard(Middleware):
             # A continuation anchored on a conversation ID is only stable while
             # the ordering key is immutable. Reject updated-time order instead
             # of silently skipping sessions that move after a rename.
-            if sort_order is not None and sort_order not in {"CREATED_AT", "CREATED_AT_DESC"}:
+            if sort_order is not None and (
+                not isinstance(sort_order, str)
+                or sort_order not in {"CREATED_AT", "CREATED_AT_DESC"}
+            ):
                 raise AuthorizationError("OpenHands sort order is not permitted")
             if arguments.get("page_id") is not None:
                 cursor_native = _decode_cursor(arguments["page_id"], self.cursor_key)
