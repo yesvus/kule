@@ -377,6 +377,17 @@ def test_task_requires_matching_issue_repo_and_canonical_identity():
         task(secrets={"name": "not-an-object"})
 
 
+@pytest.mark.parametrize(
+    "repository",
+    ["./kule", "../kule", "yesvus/.", "yesvus/..", ".", "..", "yesvus/../other"],
+)
+def test_repository_rejects_dot_and_dotdot_components(repository):
+    with pytest.raises(WorkerError, match="repository"):
+        ww._canonical_repo(repository)
+    with pytest.raises(WorkerError, match="repository"):
+        task(repository=repository, issue_ref=f"{repository}#1")
+
+
 def test_start_request_in_profile_mode_has_no_initial_message():
     value = task()
     pre = ww.ModelPreflight(
@@ -747,6 +758,38 @@ async def test_oversized_response_is_rejected_before_streaming():
         with pytest.raises(ww.WorkerResponseError, match="too large"):
             await client.status(value)
     assert stream.iterated is False
+
+
+class _OversizedStream(httpx2.AsyncByteStream):
+    def __init__(self) -> None:
+        self.chunks = 0
+
+    async def __aiter__(self):
+        self.chunks += 1
+        yield b"x" * (ww._MAX_RESPONSE_BYTES + 1)
+        self.chunks += 1
+        yield b"must not be read"
+
+
+async def test_oversized_response_closes_stream_without_reading_past_the_cap():
+    value = task()
+    server = Server(value)
+    stream = _OversizedStream()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == f"/api/conversations/{CONVERSATION_ID}":
+            return httpx2.Response(200, stream=stream)
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ww.WorkerResponseError, match="too large"):
+            await client.status(value)
+    assert stream.chunks == 1
 
 
 async def test_run_retry_exhaustion_preserves_task_for_retry():
@@ -1319,6 +1362,95 @@ async def test_cancel_during_reused_create_does_not_interrupt_existing_worker():
             await running
     assert not any(
         path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_cancel_during_pending_run_retry_does_not_interrupt_saved_task():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.task_accepted = True
+    server.conversation = conversation(value, execution_status="idle")
+    server.run_status = 429
+    run_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path.endswith("/run"):
+            run_started.set()
+            await release.wait()
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        running = asyncio.create_task(client.start(value))
+        await run_started.wait()
+        running.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_cancel_after_confirmed_run_admission_interrupts_reused_worker():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.task_accepted = True
+    server.conversation = conversation(value, execution_status="idle")
+    run_done = asyncio.Event()
+    verify_blocked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path.endswith("/run"):
+            response = await server.handler(request)
+            run_done.set()
+            return response
+        if (
+            request.method == "GET"
+            and request.url.path == f"/api/conversations/{CONVERSATION_ID}"
+            and run_done.is_set()
+        ):
+            verify_blocked.set()
+            await release.wait()
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        running = asyncio.create_task(client.start(value))
+        await verify_blocked.wait()
+        running.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_replayed_task_failing_verification_interrupts_admitted_run():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.task_accepted = False
+    server.conversation = conversation(value, execution_status="idle", current_model_id=OTHER_MODEL)
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="effective model"):
+            await client.start(value, model_verify_attempts=1, model_verify_interval=0)
+    assert server.calls[-1][:2] == (
+        "POST",
+        f"/api/conversations/{CONVERSATION_ID}/interrupt",
     )
 
 

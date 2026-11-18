@@ -1123,15 +1123,19 @@ class WorkerClient:
                         await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
                         branch_verified = True
                         dispatch = replace(dispatch, branch_verified=True)
-                    submitted = False
+                    run_admitted = False
+
+                    def mark_run_admitted() -> None:
+                        nonlocal run_admitted
+                        run_admitted = True
+
                     try:
                         accepted = await self._task_accepted(task.conversation_id)
                         if accepted is False:
                             if dispatch.raw_status != "idle":
                                 raise WorkerError("conversation exists without an accepted task")
                             await self._select_model_effort(task, preflight)
-                            submitted = True
-                            await self._submit_task(task)
+                            await self._submit_task(task, on_admitted=mark_run_admitted)
                             info = await self._await_effective(
                                 task,
                                 attempts=model_verify_attempts,
@@ -1145,8 +1149,7 @@ class WorkerClient:
                         elif accepted is True and dispatch.raw_status == "idle":
                             # The task was saved but the run slot was not admitted.
                             await self._select_model_effort(task, preflight)
-                            submitted = True
-                            await self._run_with_retry(task)
+                            await self._run_with_retry(task, on_admitted=mark_run_admitted)
                             info = await self._await_effective(
                                 task,
                                 attempts=model_verify_attempts,
@@ -1160,10 +1163,18 @@ class WorkerClient:
                         elif accepted is None and dispatch.raw_status == "idle":
                             raise WorkerError("the saved task state is unknown")
                     except asyncio.CancelledError:
-                        if submitted:
+                        if run_admitted:
                             # This call admitted the run; do not leave it
                             # running after the caller has gone away.
                             await self._safe_interrupt_shielded(task.conversation_id)
+                        raise
+                    except WorkerRunPending:
+                        # The task is saved but no run was admitted. Leave the
+                        # reused conversation untouched for a later retry.
+                        raise
+                    except WorkerError:
+                        if run_admitted:
+                            await self._safe_interrupt(task.conversation_id)
                         raise
                     if not dispatch.model_verified:
                         raise WorkerError(
@@ -1528,7 +1539,9 @@ class WorkerClient:
                 timeout=30.0,
             )
 
-    async def _submit_task(self, task: WorkerTask) -> None:
+    async def _submit_task(
+        self, task: WorkerTask, *, on_admitted: Callable[[], None] | None = None
+    ) -> None:
         try:
             await self._request(
                 "POST",
@@ -1536,14 +1549,18 @@ class WorkerClient:
                 body=build_task_message(task),
                 timeout=30.0,
             )
+            if on_admitted is not None:
+                on_admitted()
             return
         except WorkerHTTPError as exc:
             # 429 means the message was saved but no run slot was available.
             if exc.status_code != 429:
                 raise
-        await self._run_with_retry(task)
+        await self._run_with_retry(task, on_admitted=on_admitted)
 
-    async def _run_with_retry(self, task: WorkerTask) -> None:
+    async def _run_with_retry(
+        self, task: WorkerTask, *, on_admitted: Callable[[], None] | None = None
+    ) -> None:
         for attempt in range(3):
             try:
                 await self._request(
@@ -1551,6 +1568,8 @@ class WorkerClient:
                     f"/api/conversations/{task.conversation_id}/run",
                     timeout=30.0,
                 )
+                if on_admitted is not None:
+                    on_admitted()
                 return
             except WorkerHTTPError as exc:
                 if exc.status_code == 409:
@@ -1559,6 +1578,8 @@ class WorkerClient:
                     # ACP initializes. Poll briefly, then keep the saved task
                     # pending rather than reporting a false failure.
                     if await self._await_active(task.conversation_id):
+                        if on_admitted is not None:
+                            on_admitted()
                         return
                     if attempt == 2:
                         raise WorkerRunPending(task.conversation_id) from None
