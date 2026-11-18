@@ -13,14 +13,17 @@ rejects workspace paths outside the configured Canvas source root.
 
 from __future__ import annotations
 
+import base64
 import copy
 import hashlib
+import hmac
 import json
 import math
 import os
 import posixpath
 import re
 import uuid
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from functools import lru_cache
@@ -48,6 +51,61 @@ _TAG_KEY = re.compile(r"^[a-z0-9]{1,64}$")
 _MAX_MESSAGE_BLOCKS = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_MESSAGE_TOTAL_BYTES = 64 * 1024
+_MAX_BUDGET_PER_RUN = 1000.0
+_MAX_LIST_PAGES = 5
+_CURSOR_PREFIX = "gc1."
+# FastMCP forwards inbound MCP HTTP headers to the upstream request. Keep only
+# the transport and service-credential headers Canvas needs so a caller cannot
+# smuggle observability tags, cookies or other headers through the gateway.
+_ALLOWED_REQUEST_HEADERS = frozenset(
+    {
+        "accept",
+        "accept-encoding",
+        "connection",
+        "content-length",
+        "content-type",
+        "host",
+        "user-agent",
+        _API_KEY_HEADER.lower(),
+    }
+)
+# Only lifecycle metadata is returned. ConversationInfo also carries the secret
+# registry, hook definitions, agent settings, arbitrary agent state and a
+# remote workspace API key; none of those leave the gateway.
+_SAFE_CONVERSATION_FIELDS = frozenset(
+    {
+        "id",
+        "title",
+        "execution_status",
+        "created_at",
+        "updated_at",
+        "tags",
+        "workspace",
+        "max_iterations",
+        "max_budget_per_run",
+        "stuck_detection",
+        "current_model_id",
+        "available_models",
+        "current_effort",
+        "available_efforts",
+        "supports_runtime_model_switch",
+        "parent_conversation_id",
+        "sub_conversation_ids",
+        "forked_from_conversation_id",
+        "forked_from_event_id",
+        "leaf_event_id",
+        "metrics",
+    }
+)
+_SAFE_WORKSPACE_FIELDS = ("working_dir", "kind")
+_SAFE_MODEL_FIELDS = ("model_id", "name", "description")
+_SAFE_METRIC_FIELDS = (
+    "model_name",
+    "accumulated_cost",
+    "max_budget_per_task",
+    "accumulated_token_usage",
+)
+_CONVERSATION_TOOLS = frozenset({"start_conversation", "get_conversation"})
 
 
 @dataclass(frozen=True)
@@ -73,6 +131,13 @@ _ENDPOINTS: dict[str, _Endpoint] = {
         "get_conversation",
         READ,
         "get",
+        "/api/conversations/{conversation_id}",
+        frozenset({"conversation_id"}),
+    ),
+    "update_conversation_api_conversations__conversation_id__patch": _Endpoint(
+        "rename_conversation",
+        OPERATE,
+        "patch",
         "/api/conversations/{conversation_id}",
         frozenset({"conversation_id"}),
     ),
@@ -186,6 +251,7 @@ _AUDIT_FIELDS = frozenset(
         "kind",
         "source",
         "model",
+        "title",
         "agent_profile_id",
         "worktree",
         "autotitle",
@@ -245,14 +311,26 @@ def _mapped_path(value: Any) -> str:
     return normal
 
 
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate JSON keys that json.loads would silently collapse."""
+    data: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in data:
+            raise ValueError("duplicate key")
+        data[key] = value
+    return data
+
+
 def _repositories(raw: str) -> dict[str, str]:
     """Require an exact approved owner/name -> Canvas source path mapping."""
     if not raw or len(raw) > 16384:
         raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must be a non-empty JSON object")
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_unique_pairs)
     except ValueError:
-        raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must be valid JSON") from None
+        raise RuntimeError(
+            "KULE_OPENHANDS_REPOSITORIES must be valid JSON without duplicate names"
+        ) from None
     if not isinstance(data, dict) or not 1 <= len(data) <= 64:
         raise RuntimeError("KULE_OPENHANDS_REPOSITORIES must map 1 to 64 repositories")
     approved: dict[str, str] = {}
@@ -267,6 +345,20 @@ def _repositories(raw: str) -> dict[str, str]:
         approved[repository] = path
         paths.add(path)
     return approved
+
+
+def settings_from_env(env: Mapping[str, str] | None = None) -> tuple[dict[str, str], str, str]:
+    """Validate the opt-in Canvas settings without creating a client or calling Canvas."""
+    values = os.environ if env is None else env
+    repositories = _repositories(values.get("KULE_OPENHANDS_REPOSITORIES", ""))
+    origin = _origin(values.get("KULE_OPENHANDS_API_URL", ""))
+    key = _api_key(values.get("KULE_OPENHANDS_API_KEY", ""))
+    return repositories, origin, key
+
+
+def validate_settings(env: Mapping[str, str] | None = None) -> None:
+    """Side-effect-free preflight shared by check-config and mount."""
+    settings_from_env(env)
 
 
 @lru_cache(maxsize=1)
@@ -336,6 +428,10 @@ def _restrict_schemas(schemas: dict[str, Any]) -> None:
     # Keep the native worktree lifecycle, but cap a single agent run.
     iterations = start["properties"].get("max_iterations", {})
     iterations["maximum"] = 1000
+    budget = start["properties"].get("max_budget_per_run", {})
+    for option in budget.get("anyOf", []):
+        if isinstance(option, dict) and option.get("type") == "number":
+            option["maximum"] = _MAX_BUDGET_PER_RUN
     tags = start["properties"].get("tags", {})
     if isinstance(tags.get("additionalProperties"), dict):
         tags["additionalProperties"]["maxLength"] = 256
@@ -363,6 +459,21 @@ def _restrict_schemas(schemas: dict[str, Any]) -> None:
         raise RuntimeError("Kule OpenHands fixture has no TextContent")
     text["properties"]["text"]["maxLength"] = _MAX_MESSAGE_BYTES
 
+    update = schemas.get("UpdateConversationRequest")
+    if not isinstance(update, dict):
+        raise RuntimeError("Kule OpenHands fixture has no UpdateConversationRequest")
+    update["properties"] = {
+        "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "title": "Title",
+            "description": "New conversation title.",
+        }
+    }
+    update["required"] = ["title"]
+    update["additionalProperties"] = False
+
 
 def _route_type(route: Any, route_type: MCPType) -> MCPType:
     """Fail closed for any operation that escaped the schema reduction."""
@@ -379,6 +490,12 @@ def _component(route: Any, component: Any) -> None:
     # Repository scope is a Kule target-authorization parameter. It is not sent
     # upstream; the guard removes it and enforces the native kulerepo tag.
     properties = component.parameters.setdefault("properties", {})
+    if endpoint.tool == "list_conversations" and isinstance(properties.get("page_id"), dict):
+        properties["page_id"]["maxLength"] = 256
+        properties["page_id"]["description"] = (
+            "Gateway continuation cursor from the previous next_page_id; "
+            "never a native Canvas conversation ID."
+        )
     properties["repository"] = {
         "type": "string",
         "pattern": _REPOSITORY.pattern,
@@ -392,8 +509,18 @@ def _component(route: Any, component: Any) -> None:
     component.parameters["required"] = required
 
 
+class _ScopedClient(httpx2.AsyncClient):
+    """Strip caller-supplied headers before Canvas sees the request."""
+
+    async def send(self, request: httpx2.Request, **kwargs: Any) -> httpx2.Response:
+        for name in tuple(request.headers.keys()):
+            if name.lower() not in _ALLOWED_REQUEST_HEADERS:
+                del request.headers[name]
+        return await super().send(request, **kwargs)
+
+
 def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient:
-    return httpx2.AsyncClient(
+    return _ScopedClient(
         base_url=origin,
         headers={_API_KEY_HEADER: key},
         timeout=max(1.0, min(20.0, timeout_seconds - 1.0)),
@@ -402,12 +529,17 @@ def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient
     )
 
 
-@asynccontextmanager
-async def _closing_client(client: httpx2.AsyncClient):
-    try:
-        yield
-    finally:
-        await client.aclose()
+def _closing_lifespan(client: httpx2.AsyncClient):
+    """Build the callable FastMCP expects; it passes the mounted server here."""
+
+    @asynccontextmanager
+    async def lifespan(_server: FastMCP):
+        try:
+            yield {}
+        finally:
+            await client.aclose()
+
+    return lifespan
 
 
 def _message_size(message: Any) -> int | None:
@@ -465,6 +597,81 @@ def _event_id(value: Any) -> None:
         raise AuthorizationError("OpenHands event target is not permitted")
 
 
+def _cursor_key(api_key: str | None) -> bytes:
+    """Derive a stable signing key; tests without a key get a per-mount key."""
+    if api_key:
+        return hmac.new(api_key.encode("utf-8"), b"kule-openhands-cursor", hashlib.sha256).digest()
+    return os.urandom(32)
+
+
+def _encode_cursor(conversation_id: str, key: bytes) -> str:
+    payload = base64.urlsafe_b64encode(conversation_id.encode("ascii")).decode("ascii").rstrip("=")
+    signature = hmac.new(key, payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    return f"{_CURSOR_PREFIX}{signature}.{payload}"
+
+
+def _decode_cursor(value: Any, key: bytes) -> str:
+    """Return the native page position from a signed gateway cursor."""
+    if not isinstance(value, str) or len(value) > 256 or not value.startswith(_CURSOR_PREFIX):
+        raise AuthorizationError("OpenHands pagination is not permitted")
+    signature, separator, payload = value[len(_CURSOR_PREFIX) :].partition(".")
+    if (
+        not separator
+        or len(signature) != 32
+        or any(character not in "0123456789abcdef" for character in signature)
+        or not payload
+    ):
+        raise AuthorizationError("OpenHands pagination is not permitted")
+    try:
+        expected = hmac.new(key, payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+        native = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("ascii")
+        conversation_id = str(uuid.UUID(native))
+    except (ValueError, UnicodeError):
+        raise AuthorizationError("OpenHands pagination is not permitted") from None
+    if not hmac.compare_digest(signature, expected):
+        raise AuthorizationError("OpenHands pagination is not permitted")
+    return conversation_id
+
+
+def _safe_conversation(value: Any) -> dict[str, Any]:
+    """Project a native ConversationInfo onto lifecycle-only fields."""
+    if not isinstance(value, dict) or not isinstance(value.get("id"), str):
+        raise AuthorizationError("OpenHands conversation response is invalid")
+    result = {
+        name: copy.deepcopy(value[name])
+        for name in _SAFE_CONVERSATION_FIELDS
+        if name in value and name not in {"workspace", "available_models", "metrics"}
+    }
+    workspace = value.get("workspace")
+    if isinstance(workspace, dict):
+        result["workspace"] = {
+            name: workspace[name] for name in _SAFE_WORKSPACE_FIELDS if name in workspace
+        }
+    models = value.get("available_models")
+    if isinstance(models, list):
+        result["available_models"] = [
+            {name: item[name] for name in _SAFE_MODEL_FIELDS if name in item}
+            for item in models
+            if isinstance(item, dict)
+        ]
+    metrics = value.get("metrics")
+    if isinstance(metrics, dict):
+        result["metrics"] = {
+            name: copy.deepcopy(metrics[name]) for name in _SAFE_METRIC_FIELDS if name in metrics
+        }
+    profile = value.get("launched_agent_profile")
+    if isinstance(profile, dict) and isinstance(profile.get("agent_profile_id"), str):
+        result["agent_profile_id"] = profile["agent_profile_id"]
+    return result
+
+
+def _project_result(name: str, result: ToolResult) -> ToolResult:
+    if name not in _CONVERSATION_TOOLS:
+        return result
+    data = result.structured_content
+    return ToolResult(structured_content=_safe_conversation(data), meta=result.meta)
+
+
 def _ref(value: Any, *, prefix: bool = False) -> bool:
     if not isinstance(value, str):
         return False
@@ -501,8 +708,13 @@ def audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
             continue
         if isinstance(value, str):
             result[name] = value[:1024]
-        elif value is None or isinstance(value, bool | int | float):
+        elif value is None or isinstance(value, bool):
             result[name] = value
+        elif isinstance(value, int):
+            # Keep the audit writer away from unbounded integer conversion.
+            result[name] = value if -(2**53) <= value <= 2**53 else "out-of-range"
+        elif isinstance(value, float):
+            result[name] = value if math.isfinite(value) else "non-finite"
     workspace = args.get("workspace")
     if isinstance(workspace, dict) and isinstance(workspace.get("working_dir"), str):
         result["working_dir"] = workspace["working_dir"][:1024]
@@ -519,14 +731,21 @@ def audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 class _TargetGuard(Middleware):
     """Enforce repository scope and safe launch targets before any HTTP call."""
 
-    def __init__(self, client: httpx2.AsyncClient, repositories: dict[str, str]) -> None:
+    def __init__(
+        self,
+        client: httpx2.AsyncClient,
+        repositories: dict[str, str],
+        cursor_key: bytes,
+    ) -> None:
         self.client = client
         self.repositories = repositories
+        self.cursor_key = cursor_key
 
     async def on_call_tool(self, context, call_next):
         name = context.message.name
         arguments = dict(context.message.arguments or {})
         repository: str | None = None
+        cursor_native: str | None = None
 
         if name == "start_conversation":
             self._start(arguments)
@@ -537,6 +756,9 @@ class _TargetGuard(Middleware):
         elif name == "list_conversations":
             repository = self._repository(arguments.pop("repository", None))
             self._pagination(arguments)
+            if arguments.get("page_id") is not None:
+                cursor_native = _decode_cursor(arguments["page_id"], self.cursor_key)
+                arguments["page_id"] = cursor_native
         elif name == "send_message":
             repository, conversation_id = self._scope(
                 arguments, {"repository", "conversation_id", "content", "run"}
@@ -555,30 +777,137 @@ class _TargetGuard(Middleware):
             if not isinstance(model, str) or not _MODEL.fullmatch(model):
                 raise AuthorizationError("OpenHands model identifier is not permitted")
             await self._verify_repository(repository, conversation_id)
+        elif name == "rename_conversation":
+            repository, conversation_id = self._scope(
+                arguments, {"repository", "conversation_id", "title"}
+            )
+            title = arguments.get("title")
+            if (
+                not isinstance(title, str)
+                or not 1 <= len(title) <= 200
+                or any(ord(character) < 32 for character in title)
+            ):
+                raise AuthorizationError("OpenHands conversation title is not permitted")
+            await self._verify_repository(repository, conversation_id)
         elif name == "get_event":
             repository, conversation_id = self._scope(
                 arguments, {"repository", "conversation_id", "event_id"}
             )
             _event_id(arguments.get("event_id"))
             await self._verify_repository(repository, conversation_id)
+        elif name == "search_events":
+            repository, conversation_id = self._scope(
+                arguments,
+                {
+                    "repository",
+                    "conversation_id",
+                    "page_id",
+                    "limit",
+                    "kind",
+                    "source",
+                    "body",
+                    "sort_order",
+                    "timestamp__gte",
+                    "timestamp__lt",
+                },
+            )
+            self._pagination(arguments)
+            await self._verify_repository(repository, conversation_id)
         elif name in {
             "get_conversation",
             "get_conversation_runtime",
-            "search_events",
             "run_conversation",
             "interrupt_conversation",
             "pause_conversation",
         }:
             repository, conversation_id = self._scope(arguments, {"repository", "conversation_id"})
-            if name == "search_events":
-                self._pagination(arguments)
             await self._verify_repository(repository, conversation_id)
 
         context.message.arguments = arguments
         result = await call_next(context)
         if name == "list_conversations":
-            return _filter_repository(result, repository)
-        return result
+            return await self._list_repository(result, repository, cursor_native, arguments)
+        return _project_result(name, result)
+
+    async def _list_repository(
+        self,
+        result: ToolResult,
+        repository: str,
+        cursor_native: str | None,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
+        """Filter by repository and continue with a gateway cursor.
+
+        Canvas ``next_page_id`` is the next global conversation UUID, which may
+        belong to another repository. Returning it would disclose an excluded
+        conversation ID, so continuation uses the last *returned* session ID
+        behind a signed gateway token instead.
+        """
+        items: list[dict[str, Any]] = []
+        last_scanned: str | None = None
+        last_returned: str | None = None
+        next_native: str | None = None
+        pages = 0
+        truncated = False
+        skip = cursor_native
+
+        while True:
+            data = result.structured_content
+            if (
+                not isinstance(data, dict)
+                or not isinstance(data.get("items"), list)
+                or not isinstance(data.get("next_page_id"), str | None)
+            ):
+                raise AuthorizationError("OpenHands conversation list is invalid")
+            next_native = data.get("next_page_id")
+            if pages == 0 and skip is not None:
+                first = data["items"][0] if data["items"] else None
+                if not isinstance(first, dict) or first.get("id") != skip:
+                    raise AuthorizationError("OpenHands pagination cursor is stale")
+            for item in data["items"]:
+                if not isinstance(item, dict):
+                    continue
+                conversation = _safe_conversation(item)
+                conversation_id = conversation["id"]
+                last_scanned = conversation_id
+                if skip is not None:
+                    if conversation_id == skip:
+                        skip = None
+                    continue
+                tags = conversation.get("tags")
+                if isinstance(tags, dict) and tags.get("kulerepo") == repository:
+                    items.append(conversation)
+                    last_returned = conversation_id
+            pages += 1
+            if items or next_native is None or pages >= _MAX_LIST_PAGES:
+                truncated = not items and next_native is not None
+                break
+            result = await self._page(next_native, arguments)
+
+        cursor = None
+        if last_returned is not None and (last_returned != last_scanned or next_native is not None):
+            cursor = _encode_cursor(last_returned, self.cursor_key)
+        data = {"items": items, "next_page_id": cursor}
+        if truncated:
+            data["truncated"] = True
+        return ToolResult(structured_content=data, meta=result.meta)
+
+    async def _page(self, page_id: str, arguments: dict[str, Any]) -> ToolResult:
+        params = {
+            name: arguments[name] for name in ("limit", "status", "sort_order") if name in arguments
+        }
+        params["page_id"] = page_id
+        try:
+            response = await self.client.get("/api/conversations/search", params=params)
+        except httpx2.HTTPError:
+            raise AuthorizationError("OpenHands conversation list is not verified") from None
+        if response.status_code != 200:
+            raise AuthorizationError("OpenHands conversation list is not verified")
+        try:
+            data = response.json()
+        except ValueError:
+            raise AuthorizationError("OpenHands conversation list is not verified") from None
+        return ToolResult(structured_content=data)
 
     @staticmethod
     def _pagination(arguments: dict[str, Any]) -> None:
@@ -665,12 +994,14 @@ class _TargetGuard(Middleware):
                 raise AuthorizationError("OpenHands iteration limit is not permitted")
         if arguments.get("max_budget_per_run") is not None:
             budget = arguments["max_budget_per_run"]
-            if (
-                isinstance(budget, bool)
-                or not isinstance(budget, int | float)
-                or not math.isfinite(budget)
-                or budget <= 0
-            ):
+            if isinstance(budget, bool) or not isinstance(budget, int | float):
+                raise AuthorizationError("OpenHands budget is not permitted")
+            # Compare integer bounds before math.isfinite: a huge int would
+            # raise OverflowError instead of producing a clean denial.
+            if isinstance(budget, int):
+                if not 1 <= budget <= _MAX_BUDGET_PER_RUN:
+                    raise AuthorizationError("OpenHands budget is not permitted")
+            elif not math.isfinite(budget) or not 0 < budget <= _MAX_BUDGET_PER_RUN:
                 raise AuthorizationError("OpenHands budget is not permitted")
         if "autotitle" in arguments and not isinstance(arguments["autotitle"], bool):
             raise AuthorizationError("OpenHands autotitle flag is not permitted")
@@ -693,27 +1024,11 @@ class _TargetGuard(Middleware):
                 raise AuthorizationError("OpenHands repository tag is not permitted")
 
 
-def _filter_repository(result: ToolResult, repository: str | None) -> ToolResult:
-    """Return only conversations carrying the exact native kulerepo tag."""
-    data = result.structured_content
-    if repository is None or not isinstance(data, dict) or not isinstance(data.get("items"), list):
-        raise AuthorizationError("OpenHands conversation list is invalid")
-    items = []
-    for item in data["items"]:
-        tags = item.get("tags") if isinstance(item, dict) else None
-        if isinstance(tags, dict) and tags.get("kulerepo") == repository:
-            items.append(item)
-    return ToolResult(
-        structured_content={"items": items, "next_page_id": data.get("next_page_id")},
-        meta=result.meta,
-    )
-
-
 def _worktree_options(value: Any) -> bool:
     if not isinstance(value, dict) or set(value) - {"base", "ref", "branch_prefix"}:
         return False
     base = value.get("base", "default_branch")
-    if base not in {"default_branch", "head", "ref"}:
+    if not isinstance(base, str) or base not in {"default_branch", "head", "ref"}:
         return False
     ref = value.get("ref")
     if ref is not None and not _ref(ref):
@@ -733,12 +1048,12 @@ def mount(
     """Mount the reviewed Canvas management tools; client injection is for tests."""
     repositories = _repositories(os.environ.get("KULE_OPENHANDS_REPOSITORIES", ""))
     lifespan = None
+    api_key: str | None = None
     if client is None:
         origin = _origin(os.environ.get("KULE_OPENHANDS_API_URL", ""))
-        client = _client(
-            origin, _api_key(os.environ.get("KULE_OPENHANDS_API_KEY", "")), timeout_seconds
-        )
-        lifespan = _closing_client(client)
+        api_key = _api_key(os.environ.get("KULE_OPENHANDS_API_KEY", ""))
+        client = _client(origin, api_key, timeout_seconds)
+        lifespan = _closing_lifespan(client)
 
     backend = FastMCP.from_openapi(
         _restricted_spec(),
@@ -753,7 +1068,7 @@ def mount(
         strict_input_validation=True,
         lifespan=lifespan,
     )
-    backend.add_middleware(_TargetGuard(client, repositories))
+    backend.add_middleware(_TargetGuard(client, repositories, _cursor_key(api_key)))
     # Parent middleware gates tools, not arbitrary upstream resources/prompts.
     backend.disable(components={"resource", "template", "prompt"})
     mcp.mount(backend, namespace="oh")

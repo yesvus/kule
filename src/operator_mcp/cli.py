@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -41,6 +42,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.cmd == "check-config":
+        try:
+            if os.environ.get("KULE_OPENHANDS_ENABLED") == "1":
+                from .tools.openhands import validate_settings
+
+                validate_settings()
+        except RuntimeError as exc:
+            print(f"config error: {exc}", file=sys.stderr)
+            return 2
         print(f"config ok: {cfg.server.public_url} -> {cfg.server.host}:{cfg.server.port}")
         return 0
 

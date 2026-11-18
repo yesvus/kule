@@ -56,6 +56,7 @@ existing operator group; untagged tools fail closed.
 | `oh_get_event` | `GET /api/conversations/{id}/events/{event_id}` | read |
 | `oh_list_agent_profiles` | `GET /api/agent-profiles` | read |
 | `oh_start_conversation` | `POST /api/conversations` | operate |
+| `oh_rename_conversation` | `PATCH /api/conversations/{id}` | operate |
 | `oh_send_message` | `POST /api/conversations/{id}/events` | operate |
 | `oh_run_conversation` | `POST /api/conversations/{id}/run` | operate |
 | `oh_interrupt_conversation` | `POST /api/conversations/{id}/interrupt` | operate |
@@ -75,21 +76,43 @@ has no repository filter, so this cannot be passed upstream:
 - `oh_start_conversation` requires `repository` and forces the native tag
   `kulerepo=owner/name`. A caller-supplied `kulerepo` with another value is rejected.
   Issue, leg, task and model tags remain the session owner's responsibility.
-- `oh_list_conversations` passes pagination upstream, then returns only items whose
-  native `tags.kulerepo` exactly matches the requested repository and preserves the
-  upstream `next_page_id`. One bounded upstream page (maximum 100) per call; callers
-  continue with `next_page_id`. Legacy conversations without `kulerepo` are omitted
-  and remain explicitly unclassified until an operator verifies their mapping.
-- Direct-ID reads and actions (`get`, runtime, events, event, run, interrupt, pause,
-  model switch) require `repository` and first read the native conversation tags.
-  A missing tag, a different tag, or an unverifiable preflight is denied before the
-  requested action. There is no unscoped ID bypass.
+- `oh_list_conversations` asks Canvas for one bounded page (maximum 100 items), then
+  returns only items whose native `tags.kulerepo` exactly matches the requested
+  repository. When a page has no match it follows a bounded number of native pages
+  (at most 5) and returns `truncated: true` if the scan stopped early. Legacy
+  conversations without `kulerepo` are omitted and remain explicitly unclassified
+  until an operator verifies their mapping.
+- The returned continuation is a signed gateway cursor (`gc1.*`), not Canvas's
+  `next_page_id`. Canvas derives `next_page_id` from the next global conversation,
+  which can belong to another repository, so returning it would disclose an excluded
+  ID. The cursor only encodes the last session ID already returned to this caller.
+  Callers pass the cursor back as `page_id`; a stale or tampered cursor is denied
+  instead of silently restarting from the first page.
+- Direct-ID reads and actions (`get`, runtime, events, event, send message, rename,
+  run, interrupt, pause, model switch) require `repository` and first read the native
+  conversation tags. A missing tag, a different tag, or an unverifiable preflight is
+  denied before the requested action. There is no unscoped ID bypass.
+- `oh_search_events` keeps the native event filters (`kind`, `source`, `body`,
+  `sort_order`, `timestamp__gte`, `timestamp__lt`) and bounded `limit`/`page_id`
+  because every event belongs to the already-verified conversation.
 - `oh_count_conversations` is not exposed because the upstream count endpoint cannot
   be repository-scoped without global counting.
 
 LEG 2 owns filtering by issue, task, leg, model and status. This adapter only
 enforces the repository boundary and exposes the scoped/native fields it needs; it
 does not add a second session registry or database.
+
+### Safe response projection
+
+Conversation responses are projected to lifecycle fields before leaving the gateway:
+ID, title, status, timestamps, tags, `working_dir`/workspace kind, iteration and budget
+limits, current/available model metadata, metrics, parent/sub/fork identifiers and the
+launched profile ID. Canvas's `ConversationInfo` also carries the secret registry, hook
+definitions, agent settings and state, blocked-action messages and a remote workspace
+API key; those fields are dropped even if a future Canvas version adds them to the
+response. `launched_agent_profile` is reduced to its profile ID, so `secret_refs` and
+`integration_refs` do not leave the gateway.
+
 
 ### Launch request reduction
 
@@ -104,7 +127,8 @@ does not add a second session registry or database.
 - `initial_message` — text-only, at most 32 blocks, 32 KiB per block, 64 KiB total;
 - `agent_profile_id` — required Canvas profile UUID; resolve it from
   `oh_list_agent_profiles`;
-- `max_iterations` (1–1000), `max_budget_per_run`, `tags`, `autotitle`.
+- `max_iterations` (1–1000), `max_budget_per_run` (positive and at most 1000 USD),
+  `tags`, `autotitle`.
 
 The adapter deliberately removes `secrets`, `secrets_encrypted`, `agent_settings`,
 `agent_launch_additions`, `tool_module_qualnames`, `client_tools`, `hook_config`,
@@ -115,17 +139,32 @@ secret references, dynamic Python imports and privileged profile configuration.
 
 `oh_send_message` is text-only and cannot set `role`; messages are always user
 messages. `oh_switch_acp_model` changes only one ACP conversation's model, not a
-stored profile. Unknown or extra arguments fail closed rather than being silently
-dropped.
+stored profile. `oh_rename_conversation` accepts only `title` (1–200 characters); it
+cannot rewrite tags, budgets or other metadata. Unknown or extra arguments fail
+closed rather than being silently dropped.
+
+FastMCP merges inbound MCP HTTP headers into the outbound Canvas request. The adapter
+therefore sends only a fixed header allowlist: the dedicated service key plus normal
+transport headers. Caller-supplied `X-OpenHands-Observability-Tags`, `Authorization`,
+`Cookie`, tracing headers and similar values are removed before the request leaves
+the gateway. `oh_interrupt_conversation` is the native stop operation;
+`oh_pause_conversation` is the cooperative alternative.
+
 
 ## Authorization and audit
 
 - Kule's existing OAuth group and audit middleware remain the outer boundary.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
 - A call-time target guard validates the approved repository mapping, conversation
-  UUIDs, the exact repository path, worktree option shape, text-only messages, profile
-  presence and model identifier syntax before any action. Direct-ID actions also verify
-  the native `kulerepo` tag with a read-only preflight.
+  UUIDs, the exact repository path, worktree option shape, text-only messages, numeric
+  bounds, profile presence and model identifier syntax before any action. Direct-ID
+  actions also verify the native `kulerepo` tag with a read-only preflight.
+- `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
+  when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
+  does not create a client or contact Canvas. When the adapter is disabled, none of
+  those settings are required.
+- Conversation responses are projected onto the safe lifecycle schema described
+  above; raw Canvas objects are never returned.
 - Audit metadata includes the requested repository. The repository tag is written by
   the adapter at launch; callers cannot silently relabel a conversation.
 - The shared HOME, UID and worktree are not a security boundary. The exact
@@ -146,30 +185,52 @@ policy around them.
 
 A session dispatcher can use only these tools:
 
-1. `oh_list_agent_profiles` to resolve the exact ACP profile ID and its advertised
-   model. Do not substitute a paid model silently.
+1. `oh_list_agent_profiles` to resolve the exact profile ID and agent kind. The
+   profile summary does **not** guarantee an ACP model. Before dispatch, require a
+   separately verified model ID (for example from the session's own
+   `current_model_id`/`available_models` after start, or an owner-approved
+   profile-to-model mapping). If neither is available, stop dispatch. Do not silently
+   substitute a paid model.
 2. `oh_start_conversation` with `repository`, `workspace.working_dir` set to that
    repository's exact approved path, `worktree: true`, the task branch prefix (for
    example `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and optionally a
    bounded initial task message. The response returns the real native conversation
    ID. Supply the session's `kuleissue`/`kuletask`/`kulemodel` tags as appropriate.
+   A conversation ID alone does not prove the worktree was created: verify the
+   returned workspace and expected branch with `oh_get_conversation` /
+   `oh_get_conversation_runtime` before sending work. If verification fails, stop the
+   session; do not fall back to running in the source checkout.
 3. If an exact per-conversation model override is required,
    `oh_switch_acp_model(repository, conversation_id, model)` with the verified catalog
    ID. The stored profile is unchanged.
 4. `oh_send_message(repository, ..., run: true)` or
-   `oh_run_conversation(repository, ...)` to start work.
+   `oh_run_conversation(repository, ...)` to start work. If
+   `oh_send_message(..., run: true)` returns `429`, Canvas has already saved the
+   message; retry `oh_run_conversation` on the same conversation with backoff and do
+   not resend the message.
 5. Poll `oh_get_conversation`, `oh_get_conversation_runtime` and `oh_search_events`
    with `repository` for status, failures and the final report. Use
-   `oh_list_conversations(repository, ...)` with bounded `limit`/`next_page_id` for
-   discovery. Reuse native conversation state; do not persist a duplicate
-   conversation database.
-6. `oh_interrupt_conversation(repository, ...)` (or `oh_pause_conversation`) for
-   cancellation and timeout handling.
+   `oh_list_conversations(repository, ...)` with bounded `limit` and the signed
+   `page_id` cursor for discovery. Reuse native conversation state; do not persist a
+   duplicate conversation database.
+6. Optionally `oh_rename_conversation(repository, ..., title)` for a human-readable
+   label. Use `oh_interrupt_conversation(repository, ...)` (or
+   `oh_pause_conversation`) for cancellation and timeout handling.
 
 Leg 2 remains responsible for duplicate-dispatch handling, bounded concurrency,
 branch/worktree mapping, issue/leg/task/model filtering and verifying the session's
 actual branch, commit, CI and PR. This adapter only enforces repository scope and
 returns what Canvas reports.
+
+### Context compaction
+
+ACP context compaction belongs to the ACP harness/profile. Canvas also exposes a
+`POST /api/conversations/{id}/condense` route, but it is not part of this allowlist
+and must not be assumed to manage an ACP session's context. Kule does not expose
+`/condense` and does not implement another compactor. Configure compaction in the
+selected ACP profile or harness, and treat a harness that cannot compact as a known
+session limitation rather than adding a Kule-side summarizer.
+
 
 ## Separate Automation Service API (inventory only, not mounted)
 
