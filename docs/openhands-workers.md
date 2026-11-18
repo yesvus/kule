@@ -182,11 +182,11 @@ The result is bounded and repository-scoped. `unclassified_count` says how many 
 ## Start admission, timeout, reconciliation and cancel
 
 - **Start admission:** `WorkerClient(max_concurrent_starts=2)` admits at most two start POSTs at once. This is request admission only. It does not count running workers, bound total active conversations or provide a queue.
-- **Same id:** a per-conversation client lock serializes create attempts for one id while different ids proceed in parallel.
+- **Same id:** a per-conversation client lock serializes create attempts for one id within one `WorkerClient` instance in one process while different ids proceed in parallel. Starts of the same id from separate processes are not serialized; do not dispatch the same id from independent clients.
 - **Timeout:** the create POST uses `timeout_seconds`. A lost create response cannot prove whether this request created the worker, so `WorkerTimeout` returns the client-generated id for inspection and does **not** interrupt a possibly reused conversation.
 - **Cancellation:** the caller's cancellation is preserved. Cancellation during the create POST is ambiguous and does not interrupt; cancellation after a known HTTP 201 interrupts the worker this request created.
 - **201 body failure:** an invalid or oversized 201 body interrupts the newly created worker. An invalid/oversized 200 body never interrupts an existing conversation.
-- **Retry after a saved task:** a 200 reuse is not treated as a completed dispatch. If the conversation is idle and has no user message, the task is submitted once; if the task is saved but the run was never admitted, only `/run` is retried. A running/finished conversation is a no-op.
+- **Retry after a saved task:** a 200 reuse is not treated as a completed dispatch. If the conversation is idle and has no user message, the model/effort are selected and the task is submitted once; if the task is saved but the run was never admitted, only `/run` is retried. A 409 from `/run` is treated as success when the conversation is already active; if the task remains idle, `/run` is retried. A running/finished conversation is a no-op.
 - **429 on task submission:** the message is already saved; the client retries `POST /run` with bounded backoff instead of resending it.
 - **Cancel:** `stop(task)` checks repository scope under the same per-id lock as start, calls native `/interrupt`, then reads the actual state. It does not report `paused` from the acknowledgment alone and never calls `DELETE`.
 

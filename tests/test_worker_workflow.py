@@ -15,6 +15,7 @@ from operator_mcp.worker_workflow import (
     DEFAULT_MODEL,
     WorkerClient,
     WorkerError,
+    WorkerRunPending,
     WorkerTask,
     WorkerTimeout,
     build_prompt,
@@ -713,6 +714,46 @@ async def test_oversized_response_is_rejected_before_streaming():
         with pytest.raises(ww.WorkerResponseError, match="too large"):
             await client.status(value)
     assert stream.iterated is False
+
+
+async def test_run_retry_exhaustion_preserves_task_for_retry():
+    value = task()
+    server = Server(value)
+    server.event_status = 429
+    server.run_status = 429
+    server.conversation = conversation(value, execution_status="idle")
+    async with client_for(server) as client:
+        with pytest.raises(WorkerRunPending) as err:
+            await client.start(value)
+    assert err.value.conversation_id == CONVERSATION_ID
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+    first_events = [call for call in server.calls if call[1].endswith("/events")]
+    assert len(first_events) == 1
+
+    # Capacity returns; an identical retry only retries /run.
+    server.run_status = 200
+    server.start_status = 200
+    server.task_accepted = True
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.created is False
+    assert result.model_verified is True
+    assert len([call for call in server.calls if call[1].endswith("/events")]) == 1
+    assert len([call for call in server.calls if call[1].endswith("/run")]) >= 4
+
+
+async def test_409_run_is_active_success():
+    value = task()
+    server = Server(value)
+    server.event_status = 429
+    server.run_status = 409
+    server.conversation = conversation(value, execution_status="running")
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.model_verified is True
+    assert any(call[1].endswith("/run") for call in server.calls)
 
 
 async def test_429_save_then_run_retry():

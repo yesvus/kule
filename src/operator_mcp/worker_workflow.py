@@ -105,6 +105,17 @@ class WorkerTimeout(WorkerError):
         self.conversation_id = conversation_id
 
 
+class WorkerRunPending(WorkerError):
+    """The task was saved but no run slot was admitted after bounded retries.
+
+    A later identical dispatch may retry ``/run`` without reposting the task.
+    """
+
+    def __init__(self, conversation_id: UUID) -> None:
+        super().__init__("the task was saved but no run slot was admitted; retry the conversation")
+        self.conversation_id = conversation_id
+
+
 class WorkerHTTPError(WorkerError):
     """A non-2xx OpenHands response; status is preserved for recovery."""
 
@@ -1052,13 +1063,18 @@ class WorkerClient:
             # can race the force-remove step. This lock also serializes task
             # submission and run retries with stop() for the same id.
             async with self._start_lock(task.conversation_id):
-                async with self._start_slots:
-                    status, info = await self._request(
-                        "POST",
-                        "/api/conversations",
-                        body=body,
-                        timeout=task.timeout_seconds,
-                    )
+                try:
+                    async with self._start_slots:
+                        status, info = await self._request(
+                            "POST",
+                            "/api/conversations",
+                            body=body,
+                            timeout=task.timeout_seconds,
+                        )
+                except WorkerResponseError as exc:
+                    if exc.status_code == 201:
+                        await self._safe_interrupt(task.conversation_id)
+                    raise
                 if status not in (200, 201):
                     raise WorkerError(f"unexpected OpenHands start status {status}")
 
@@ -1067,11 +1083,15 @@ class WorkerClient:
                     legacy = self._validate_common(task, info, repo_path=repo_path)
                     if legacy:
                         raise WorkerError("a legacy conversation cannot be reused for dispatch")
-                    accepted = await self._task_accepted(task.conversation_id)
                     dispatch = self._dispatch(task, info, created=False)
+                    if branch_reader is not None:
+                        await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
+                        dispatch = replace(dispatch, branch_verified=True)
+                    accepted = await self._task_accepted(task.conversation_id)
                     if accepted is False:
                         if dispatch.raw_status != "idle":
                             raise WorkerError("conversation exists without an accepted task")
+                        await self._select_model_effort(task, preflight)
                         await self._submit_task(task)
                         info = await self._await_effective(
                             task,
@@ -1082,6 +1102,7 @@ class WorkerClient:
                         dispatch = self._dispatch(task, info, created=False)
                     elif accepted is True and dispatch.raw_status == "idle":
                         # The task was saved but the run slot was not admitted.
+                        await self._select_model_effort(task, preflight)
                         await self._run_with_retry(task)
                         info = await self._await_effective(
                             task,
@@ -1092,9 +1113,6 @@ class WorkerClient:
                         dispatch = self._dispatch(task, info, created=False)
                     elif accepted is None and dispatch.raw_status == "idle":
                         raise WorkerError("the saved task state is unknown")
-                    if branch_reader is not None:
-                        await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
-                        dispatch = replace(dispatch, branch_verified=True)
                     if not dispatch.model_verified:
                         raise WorkerError(
                             "the existing conversation has no matching effective model"
@@ -1127,6 +1145,10 @@ class WorkerClient:
                     # This request received HTTP 201, so it owns the worker.
                     await self._safe_interrupt_shielded(task.conversation_id)
                     raise
+                except WorkerRunPending:
+                    # The message is saved; a later retry can admit /run
+                    # without reposting it.
+                    raise
                 except WorkerError:
                     await self._safe_interrupt(task.conversation_id)
                     raise
@@ -1139,10 +1161,6 @@ class WorkerClient:
                 task.conversation_id,
             ) from None
         except asyncio.CancelledError:
-            raise
-        except WorkerResponseError as exc:
-            if exc.status_code == 201:
-                await self._safe_interrupt(task.conversation_id)
             raise
 
     async def status(
@@ -1350,20 +1368,28 @@ class WorkerClient:
 
     async def stop(self, task: WorkerTask, *, timeout: float = 20.0) -> WorkerStop:
         """Interrupt a scoped conversation and report its actual state."""
-        async with self._start_lock(task.conversation_id):
-            _, info = await self._request(
-                "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
-            )
-            self._validate_scope(task, info)
-            await self._interrupt_raw(task.conversation_id, timeout=timeout)
-            try:
-                _, current = await self._request(
-                    "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
-                )
-                raw = current.get("execution_status")
-                raw_status = raw if isinstance(raw, str) else "unknown"
-            except WorkerError:
-                raw_status = "unknown"
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._start_lock(task.conversation_id):
+                    _, info = await self._request(
+                        "GET",
+                        f"/api/conversations/{task.conversation_id}",
+                        timeout=20.0,
+                    )
+                    self._validate_scope(task, info)
+                    await self._interrupt_raw(task.conversation_id, timeout=timeout)
+                    try:
+                        _, current = await self._request(
+                            "GET",
+                            f"/api/conversations/{task.conversation_id}",
+                            timeout=20.0,
+                        )
+                        raw = current.get("execution_status")
+                        raw_status = raw if isinstance(raw, str) else "unknown"
+                    except WorkerError:
+                        raw_status = "unknown"
+        except TimeoutError:
+            raise WorkerError("stop timed out waiting for the conversation") from None
         return WorkerStop(
             conversation_id=task.conversation_id,
             acknowledged=True,
@@ -1388,8 +1414,15 @@ class WorkerClient:
         interrupt = asyncio.create_task(self._safe_interrupt(conversation_id))
         try:
             await asyncio.shield(interrupt)
-        except BaseException:  # noqa: S110 - cancellation is preserved
-            pass
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and hasattr(current, "uncancel"):
+                current.uncancel()
+            try:
+                await interrupt
+            except BaseException:  # noqa: S110 - cancellation is preserved
+                pass
+            raise
 
     async def _select_model_effort(self, task: WorkerTask, preflight: ModelPreflight) -> None:
         if preflight.switch_model:
@@ -1432,9 +1465,27 @@ class WorkerClient:
                 )
                 return
             except WorkerHTTPError as exc:
-                if exc.status_code != 429 or attempt == 2:
+                if exc.status_code == 409:
+                    if await self._is_active(task.conversation_id):
+                        return
+                    if attempt == 2:
+                        raise
+                    continue
+                if exc.status_code != 429:
                     raise
+                if attempt == 2:
+                    raise WorkerRunPending(task.conversation_id) from None
                 await asyncio.sleep(0.25 * (attempt + 1))
+
+    async def _is_active(self, conversation_id: UUID) -> bool:
+        try:
+            _, info = await self._request(
+                "GET", f"/api/conversations/{conversation_id}", timeout=20.0
+            )
+        except WorkerError:
+            return False
+        raw = info.get("execution_status")
+        return isinstance(raw, str) and raw not in {"idle", "unknown"}
 
     async def _task_accepted(self, conversation_id: UUID) -> bool | None:
         try:
@@ -1484,7 +1535,10 @@ class WorkerClient:
         self, reader: BranchReader, workspace: str
     ) -> tuple[str | None, str | None]:
         try:
-            actual = await reader(workspace)
+            async with asyncio.timeout(5.0):
+                actual = await reader(workspace)
+        except TimeoutError:
+            return None, "branch read timed out"
         except Exception as exc:
             return None, f"branch read failed ({type(exc).__name__})"
         if not isinstance(actual, str) or not actual:
