@@ -154,6 +154,8 @@ class Server:
         self.run_status = 200
         self.final_status = 200
         self.task_accepted = True
+        # Statuses returned by successive single-conversation GETs.
+        self.get_status_script: list[str] = []
         self.search_pages: list[dict] = [
             {"items": [conversation(task_value)], "next_page_id": None}
         ]
@@ -239,10 +241,21 @@ class Server:
             parts = path.strip("/").split("/")
             # /api/conversations/{id}/{action}
             if len(parts) == 4 and parts[3] == "switch_acp_model":
+                self.conversation = {
+                    **self.conversation,
+                    "current_model_id": body["model"],
+                }
                 return httpx2.Response(200, json={"success": True})
             if len(parts) == 4 and parts[3] == "switch_acp_effort":
+                self.conversation = {
+                    **self.conversation,
+                    "current_effort": body["effort"],
+                }
                 return httpx2.Response(200, json={"success": True})
             if len(parts) == 4 and parts[3] == "events":
+                # A saved message is accepted even when no run slot is
+                # available (HTTP 429).
+                self.task_accepted = True
                 if self.event_status == 200:
                     self.conversation = {
                         **self.conversation,
@@ -273,6 +286,11 @@ class Server:
             and path.count("/") == 3
         ):
             conversation_id = path.rsplit("/", 1)[-1]
+            if self.get_status_script:
+                self.conversation = {
+                    **self.conversation,
+                    "execution_status": self.get_status_script.pop(0),
+                }
             return httpx2.Response(200, json=self.info_for(conversation_id))
         if (
             request.method == "GET"
@@ -335,8 +353,14 @@ def test_task_requires_matching_issue_repo_and_canonical_identity():
         task(issue_ref="yesvus/ops#23")
     with pytest.raises(WorkerError, match="repository"):
         task(repository="not-a-repo")
-    with pytest.raises(WorkerError, match="dot path"):
+    with pytest.raises(WorkerError, match="issue_ref"):
         task(repository="../kule", issue_ref="../kule#1")
+    with pytest.raises(WorkerError, match="repository"):
+        task(repository="../kule")
+    with pytest.raises(WorkerError, match="repository"):
+        task(repository="yesvus/..")
+    with pytest.raises(WorkerError, match="repository"):
+        ww._canonical_repo("yesvus/..")
     with pytest.raises(WorkerError, match="conversation_id"):
         task(conversation_id="../../etc/passwd")
     with pytest.raises(WorkerError, match="branch_prefix"):
@@ -506,12 +530,15 @@ async def test_start_creates_verifies_then_submits_task():
         for index, call in enumerate(server.calls)
         if call[0] == "POST" and call[1] == "/api/conversations"
     )
-    event_index = next(
-        index
+    events = [
+        (index, call)
         for index, call in enumerate(server.calls)
         if call[1] == f"/api/conversations/{CONVERSATION_ID}/events"
-    )
+    ]
+    assert len(events) == 1
+    event_index, event = events[0]
     assert start_index < event_index
+    assert event[2] == build_task_message(value)
     assert server.calls[start_index][2]["worktree"] is True
     assert server.calls[start_index][2]["tags"]["kulerepo"] == "yesvus/kule"
     assert "initial_message" not in server.calls[start_index][2]
@@ -526,9 +553,12 @@ async def test_start_override_mode_selects_model_natively_and_filters_secrets():
     )
     server = Server(value, profile_model=OTHER_MODEL)
     server.profile = {**server.profile, "secret_refs": ["OPENCODE_API_KEY"]}
+    # Start from a different effective model so a no-op switch cannot pass.
+    server.conversation = conversation(value, current_model_id=OTHER_MODEL)
     async with client_for(server) as client:
         result = await client.start(value)
     assert result.effective_model == DEFAULT_MODEL
+    assert server.conversation["current_model_id"] == DEFAULT_MODEL
     start = next(call for call in server.calls if call[1] == "/api/conversations")
     assert "agent_profile_id" not in start[2]
     assert start[2]["agent_settings"]["acp_model"] == DEFAULT_MODEL
@@ -540,11 +570,14 @@ async def test_start_override_mode_selects_model_natively_and_filters_secrets():
 async def test_start_effort_is_selected_and_verified():
     value = task(expected_effort="high")
     server = Server(value)
+    # Start without an effective effort so a no-op switch cannot pass.
+    server.conversation = conversation(value, current_effort=None)
     async with client_for(server) as client:
         result = await client.start(value)
     assert result.effort == "high"
     assert result.effective_effort == "high"
     assert result.effort_verified is True
+    assert server.conversation["current_effort"] == "high"
     switch = next(call for call in server.calls if call[1].endswith("/switch_acp_effort"))
     assert switch[2] == {"effort": "high"}
 
@@ -756,6 +789,39 @@ async def test_409_run_is_active_success():
     assert any(call[1].endswith("/run") for call in server.calls)
 
 
+async def test_409_run_polls_until_the_admitted_run_is_visible():
+    value = task()
+    server = Server(value)
+    server.event_status = 429
+    server.run_status = 409
+    server.conversation = conversation(value, execution_status="idle")
+    # Canvas can report idle for one read while ACP initializes the run
+    # admitted by the previous (response-lost) request.
+    server.get_status_script = ["idle", "running"]
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.model_verified is True
+    assert server.conversation["execution_status"] == "running"
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_409_run_that_never_starts_reports_pending_not_failure():
+    value = task()
+    server = Server(value)
+    server.event_status = 429
+    server.run_status = 409
+    server.conversation = conversation(value, execution_status="idle")
+    async with client_for(server) as client:
+        with pytest.raises(WorkerRunPending):
+            await client.start(value)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+    assert len([call for call in server.calls if call[1].endswith("/events")]) == 1
+
+
 async def test_429_save_then_run_retry():
     value = task()
     server = Server(value)
@@ -772,12 +838,19 @@ async def test_duplicate_idle_without_saved_task_replays_once():
     server.start_status = 200
     server.task_accepted = False
     server.conversation = conversation(value, execution_status="idle")
+
+    async def good(_: str) -> str:
+        return value.branch
+
     async with client_for(server) as client:
-        result = await client.start(value)
+        result = await client.start(value, branch_reader=good)
     assert result.created is False
     assert result.model_verified is True
+    # Reconciliation must not discard the branch verification it just did.
+    assert result.branch_verified is True
     events = [call for call in server.calls if call[1].endswith("/events")]
     assert len(events) == 1
+    assert events[0][2] == build_task_message(value)
 
 
 async def test_duplicate_idle_with_saved_task_only_retries_run():
@@ -932,6 +1005,8 @@ async def test_legacy_conversation_cannot_be_reused_for_dispatch():
         (evidence_block(task(), commit="abc"), "40 lowercase"),
         (evidence_block(task(), tests=[]), "non-empty list"),
         (evidence_block(task(), pr_url="http://github.com/yesvus/kule/pull/42"), "pr_url"),
+        (evidence_block(task(), pr_url="https://github.com/../kule/pull/42"), "pr_url"),
+        (evidence_block(task(), pr_url="https://github.com/yesvus/../pull/42"), "pr_url"),
     ],
 )
 async def test_invalid_evidence_is_reported_not_raised(block, message):
@@ -1149,6 +1224,7 @@ async def test_same_id_start_is_serialized_and_different_ids_run_in_parallel():
         )
     assert server.max_active_starts == 1
     assert {first.created, second.created} == {True, False}
+    assert len([call for call in server.calls if call[1].endswith("/events")]) == 1
 
     tasks = [task(conversation_id=uuid4()) for _ in range(3)]
     server = Server(tasks[0])
@@ -1185,6 +1261,95 @@ async def test_start_timeout_does_not_interrupt_ambiguous_worker(monkeypatch):
         path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
     )
     await client.aclose()
+
+
+async def test_cancel_after_create_admission_interrupts_created_worker():
+    value = task()
+    server = Server(value)
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path == "/api/conversations":
+            admitted.set()
+            await release.wait()
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        running = asyncio.create_task(client.start(value))
+        await admitted.wait()
+        running.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_cancel_during_reused_create_does_not_interrupt_existing_worker():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    admitted = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path == "/api/conversations":
+            admitted.set()
+            await release.wait()
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        running = asyncio.create_task(client.start(value))
+        await admitted.wait()
+        running.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_cancel_before_create_admission_sends_no_request():
+    value = task()
+    server = Server(value)
+    blocked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/api/agent-profiles":
+            blocked.set()
+            await release.wait()
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        running = asyncio.create_task(client.start(value))
+        await blocked.wait()
+        running.cancel()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await running
+    assert not any(path == "/api/conversations" for _, path, _, _ in server.calls)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
 
 
 def test_api_origin_key_proxy_and_repository_mapping_are_exact():
@@ -1248,16 +1413,27 @@ def test_agent_settings_allows_blank_command_and_empty_args():
     )
     assert "acp_command" not in settings
     assert settings["acp_args"] == [""]
-    with pytest.raises(WorkerError, match="command is invalid"):
-        ww._agent_settings_from_profile(
-            {
-                "acp_server": "opencode",
-                "acp_model": DEFAULT_MODEL,
-                "acp_command": ["", "arg"],
-            },
-            DEFAULT_MODEL,
-            None,
-        )
+    # Empty argument tokens after a valid executable are preserved.
+    assert ww._agent_settings_from_profile(
+        {
+            "acp_server": "opencode",
+            "acp_model": DEFAULT_MODEL,
+            "acp_command": ["opencode", ""],
+        },
+        DEFAULT_MODEL,
+        None,
+    )["acp_command"] == ["opencode", ""]
+    for bad in (["", "arg"], [""], '""'):
+        with pytest.raises(WorkerError, match="command is invalid"):
+            ww._agent_settings_from_profile(
+                {
+                    "acp_server": "opencode",
+                    "acp_model": DEFAULT_MODEL,
+                    "acp_command": bad,
+                },
+                DEFAULT_MODEL,
+                None,
+            )
 
     with pytest.raises(WorkerError, match="custom ACP"):
         ww._agent_settings_from_profile(

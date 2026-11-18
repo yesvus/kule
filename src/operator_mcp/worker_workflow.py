@@ -61,11 +61,14 @@ _MAX_SEARCH_PAGES = 100
 _MAX_SEARCH_RESULTS = 1000
 _MAX_EFFORT = 100
 
-_ISSUE_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REPO_COMPONENT = r"(?!\.{1,2}(?:/|#|$))[A-Za-z0-9_.-]+"
+_ISSUE_RE = re.compile(rf"^{_REPO_COMPONENT}/{_REPO_COMPONENT}#[1-9][0-9]*$")
+_REPO_RE = re.compile(rf"^{_REPO_COMPONENT}/{_REPO_COMPONENT}$")
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*$")
 _BRANCH_PREFIX_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]*)?$")
-_PR_RE = re.compile(r"^https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)$")
+_PR_RE = re.compile(
+    rf"^https://github\.com/({_REPO_COMPONENT})/({_REPO_COMPONENT})/pull/([1-9][0-9]*)$"
+)
 _COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 _EVIDENCE_RE = re.compile(
     r"```worker-evidence[ \t]*\r?\n(\{.*?\})\r?\n```",
@@ -544,15 +547,13 @@ def _safe_url(base: str) -> str:
 
 
 def _canonical_repo(repository: str) -> str:
-    if (
-        not isinstance(repository, str)
-        or len(repository) > 150
-        or not _REPO_RE.fullmatch(repository)
-    ):
+    if not isinstance(repository, str) or len(repository) > 150 or repository.count("/") != 1:
         raise WorkerError("repository must look like owner/name")
     owner, name = repository.split("/", 1)
     if owner in {".", ".."} or name in {".", ".."}:
         raise WorkerError("repository must not contain dot path components")
+    if not _REPO_RE.fullmatch(repository):
+        raise WorkerError("repository must look like owner/name")
     return repository.lower()
 
 
@@ -649,6 +650,30 @@ def build_prompt(task: WorkerTask) -> str:
     )
 
 
+def _acp_command_tokens(value: Any) -> list[str] | None:
+    """Return a validated argv, or ``None`` for an unset/blank built-in command."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.strip():
+            return None
+        try:
+            tokens = shlex.split(value)
+        except ValueError:
+            raise WorkerError("the profile ACP command is not parseable") from None
+    elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+        tokens = list(value)
+    else:
+        raise WorkerError("the profile ACP command is invalid")
+    if not tokens:
+        return None
+    # A whitespace-only or empty executable would be passed verbatim by the
+    # pinned SDK instead of selecting the provider default.
+    if not tokens[0].strip():
+        raise WorkerError("the profile ACP command is invalid")
+    return tokens
+
+
 def _agent_settings_from_profile(
     profile: Mapping[str, Any], target_model: str, target_effort: str | None
 ) -> dict[str, Any]:
@@ -665,20 +690,9 @@ def _agent_settings_from_profile(
             continue
         if profile.get(key) is not None:
             settings[key] = profile[key]
-    command = profile.get("acp_command")
-    if command is not None and not (isinstance(command, str) and not command.strip()):
-        if isinstance(command, str):
-            try:
-                settings["acp_command"] = shlex.split(command)
-            except ValueError:
-                raise WorkerError("the profile ACP command is not parseable") from None
-        elif isinstance(command, list) and all(isinstance(item, str) for item in command):
-            if command:
-                if not command[0].strip():
-                    raise WorkerError("the profile ACP command is invalid")
-                settings["acp_command"] = list(command)
-        else:
-            raise WorkerError("the profile ACP command is invalid")
+    command = _acp_command_tokens(profile.get("acp_command"))
+    if command is not None:
+        settings["acp_command"] = command
     arguments = profile.get("acp_args")
     if arguments is not None:
         if isinstance(arguments, list) and all(isinstance(item, str) for item in arguments):
@@ -783,7 +797,11 @@ def parse_pr_evidence(text: str, task: WorkerTask) -> PullRequestEvidence:
     if not match:
         raise WorkerError("pr_url must be an exact https://github.com pull request URL")
     owner, repo, _number = match.groups()
-    if f"{owner}/{repo}".lower() != task.repository_key:
+    try:
+        reported_repository = _canonical_repo(f"{owner}/{repo}")
+    except WorkerError:
+        raise WorkerError("pr_url is not a valid repository URL") from None
+    if reported_repository != task.repository_key:
         raise WorkerError("pr_url is for a different repository")
 
     branch = _safe_line(payload.get("branch"), name="branch", limit=300)
@@ -1066,17 +1084,30 @@ class WorkerClient:
             # can race the force-remove step. This lock also serializes task
             # submission and run retries with stop() for the same id.
             async with self._start_lock(task.conversation_id):
+                create: asyncio.Task[tuple[int, dict[str, Any]]] | None = None
                 try:
                     async with self._start_slots:
-                        status, info = await self._request(
-                            "POST",
-                            "/api/conversations",
-                            body=body,
-                            timeout=task.timeout_seconds,
+                        create = asyncio.create_task(
+                            self._request(
+                                "POST",
+                                "/api/conversations",
+                                body=body,
+                                timeout=task.timeout_seconds,
+                            )
                         )
+                        status, info = await asyncio.shield(create)
                 except WorkerResponseError as exc:
                     if exc.status_code == 201:
                         await self._safe_interrupt(task.conversation_id)
+                    raise
+                except asyncio.CancelledError:
+                    # The create POST was already admitted. Let it settle so a
+                    # worker this call created can be interrupted; a reused
+                    # conversation (HTTP 200) is left untouched. Cancellation
+                    # before admission leaves the id unused.
+                    settled, _ = await self._settle_create(create)
+                    if settled == 201:
+                        await self._safe_interrupt_shielded(task.conversation_id)
                     raise
                 if status not in (200, 201):
                     raise WorkerError(f"unexpected OpenHands start status {status}")
@@ -1087,35 +1118,53 @@ class WorkerClient:
                     if legacy:
                         raise WorkerError("a legacy conversation cannot be reused for dispatch")
                     dispatch = self._dispatch(task, info, created=False)
+                    branch_verified = False
                     if branch_reader is not None:
                         await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
+                        branch_verified = True
                         dispatch = replace(dispatch, branch_verified=True)
-                    accepted = await self._task_accepted(task.conversation_id)
-                    if accepted is False:
-                        if dispatch.raw_status != "idle":
-                            raise WorkerError("conversation exists without an accepted task")
-                        await self._select_model_effort(task, preflight)
-                        await self._submit_task(task)
-                        info = await self._await_effective(
-                            task,
-                            attempts=model_verify_attempts,
-                            interval=model_verify_interval,
-                        )
-                        self._validate_common(task, info, repo_path=repo_path)
-                        dispatch = self._dispatch(task, info, created=False)
-                    elif accepted is True and dispatch.raw_status == "idle":
-                        # The task was saved but the run slot was not admitted.
-                        await self._select_model_effort(task, preflight)
-                        await self._run_with_retry(task)
-                        info = await self._await_effective(
-                            task,
-                            attempts=model_verify_attempts,
-                            interval=model_verify_interval,
-                        )
-                        self._validate_common(task, info, repo_path=repo_path)
-                        dispatch = self._dispatch(task, info, created=False)
-                    elif accepted is None and dispatch.raw_status == "idle":
-                        raise WorkerError("the saved task state is unknown")
+                    submitted = False
+                    try:
+                        accepted = await self._task_accepted(task.conversation_id)
+                        if accepted is False:
+                            if dispatch.raw_status != "idle":
+                                raise WorkerError("conversation exists without an accepted task")
+                            await self._select_model_effort(task, preflight)
+                            submitted = True
+                            await self._submit_task(task)
+                            info = await self._await_effective(
+                                task,
+                                attempts=model_verify_attempts,
+                                interval=model_verify_interval,
+                            )
+                            self._validate_common(task, info, repo_path=repo_path)
+                            dispatch = replace(
+                                self._dispatch(task, info, created=False),
+                                branch_verified=branch_verified or None,
+                            )
+                        elif accepted is True and dispatch.raw_status == "idle":
+                            # The task was saved but the run slot was not admitted.
+                            await self._select_model_effort(task, preflight)
+                            submitted = True
+                            await self._run_with_retry(task)
+                            info = await self._await_effective(
+                                task,
+                                attempts=model_verify_attempts,
+                                interval=model_verify_interval,
+                            )
+                            self._validate_common(task, info, repo_path=repo_path)
+                            dispatch = replace(
+                                self._dispatch(task, info, created=False),
+                                branch_verified=branch_verified or None,
+                            )
+                        elif accepted is None and dispatch.raw_status == "idle":
+                            raise WorkerError("the saved task state is unknown")
+                    except asyncio.CancelledError:
+                        if submitted:
+                            # This call admitted the run; do not leave it
+                            # running after the caller has gone away.
+                            await self._safe_interrupt_shielded(task.conversation_id)
+                        raise
                     if not dispatch.model_verified:
                         raise WorkerError(
                             "the existing conversation has no matching effective model"
@@ -1414,18 +1463,54 @@ class WorkerClient:
             pass
 
     async def _safe_interrupt_shielded(self, conversation_id: UUID) -> None:
+        """Interrupt while suppressing repeated cancellation until it settles.
+
+        Callers re-raise the original cancellation; keeping the cleanup task
+        inside the per-id lock prevents a retry from reusing the id before the
+        interrupt reaches Canvas.
+        """
         interrupt = asyncio.create_task(self._safe_interrupt(conversation_id))
         try:
-            await asyncio.shield(interrupt)
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and hasattr(current, "uncancel"):
-                current.uncancel()
-            try:
-                await interrupt
-            except BaseException:  # noqa: S110 - cancellation is preserved
-                pass
-            raise
+            while not interrupt.done():
+                try:
+                    await asyncio.shield(interrupt)
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and hasattr(current, "uncancel"):
+                        current.uncancel()
+                    continue
+                except Exception:
+                    break
+        finally:
+            if not interrupt.done():
+                interrupt.cancel()
+
+    async def _settle_create(
+        self, create: asyncio.Task[tuple[int, dict[str, Any]]] | None
+    ) -> tuple[int | None, dict[str, Any] | None]:
+        """Await an admitted create after caller cancellation.
+
+        The caller is already being cancelled; this only establishes whether
+        the request created a worker (HTTP 201) so it can be interrupted. A
+        second cancellation is suppressed until the admitted POST settles so
+        the id cannot be reused while its outcome is unknown.
+        """
+        if create is None:
+            return None, None
+        try:
+            while not create.done():
+                try:
+                    await asyncio.shield(create)
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and hasattr(current, "uncancel"):
+                        current.uncancel()
+                    continue
+            return create.result()
+        except WorkerResponseError as exc:
+            return exc.status_code, None
+        except (asyncio.CancelledError, Exception):
+            return None, None
 
     async def _select_model_effort(self, task: WorkerTask, preflight: ModelPreflight) -> None:
         if preflight.switch_model:
@@ -1469,16 +1554,31 @@ class WorkerClient:
                 return
             except WorkerHTTPError as exc:
                 if exc.status_code == 409:
-                    if await self._is_active(task.conversation_id):
+                    # A previous /run may have been admitted without its
+                    # response reaching us; Canvas can still report idle while
+                    # ACP initializes. Poll briefly, then keep the saved task
+                    # pending rather than reporting a false failure.
+                    if await self._await_active(task.conversation_id):
                         return
                     if attempt == 2:
-                        raise
+                        raise WorkerRunPending(task.conversation_id) from None
+                    await asyncio.sleep(0.25 * (attempt + 1))
                     continue
                 if exc.status_code != 429:
                     raise
                 if attempt == 2:
                     raise WorkerRunPending(task.conversation_id) from None
                 await asyncio.sleep(0.25 * (attempt + 1))
+
+    async def _await_active(
+        self, conversation_id: UUID, *, attempts: int = 5, interval: float = 0.15
+    ) -> bool:
+        for attempt in range(attempts):
+            if await self._is_active(conversation_id):
+                return True
+            if attempt + 1 < attempts:
+                await asyncio.sleep(interval)
+        return False
 
     async def _is_active(self, conversation_id: UUID) -> bool:
         try:
@@ -1488,7 +1588,7 @@ class WorkerClient:
         except WorkerError:
             return False
         raw = info.get("execution_status")
-        return isinstance(raw, str) and raw not in {"idle", "unknown"}
+        return raw in {"running", "waiting_for_confirmation"}
 
     async def _task_accepted(self, conversation_id: UUID) -> bool | None:
         try:
@@ -1693,6 +1793,10 @@ class WorkerClient:
         if not match:
             raise WorkerError("pr_url is invalid")
         owner, repo, number = match.groups()
+        try:
+            _canonical_repo(f"{owner}/{repo}")
+        except WorkerError:
+            raise WorkerError("pr_url is not a valid repository URL") from None
         _, pr = await self._request(
             "GET",
             f"/api/git/repositories/{quote(owner, safe='')}/{quote(repo, safe='')}"
