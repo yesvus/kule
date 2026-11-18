@@ -25,7 +25,7 @@ import os
 import re
 import shlex
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlsplit
@@ -1511,23 +1511,7 @@ class WorkerClient:
 
     @staticmethod
     def _with_branch_verified(dispatch: WorkerDispatch) -> WorkerDispatch:
-        return WorkerDispatch(
-            repository=dispatch.repository,
-            conversation_id=dispatch.conversation_id,
-            branch=dispatch.branch,
-            workspace=dispatch.workspace,
-            model=dispatch.model,
-            effective_model=dispatch.effective_model,
-            effort=dispatch.effort,
-            effective_effort=dispatch.effective_effort,
-            acp_server=dispatch.acp_server,
-            created=dispatch.created,
-            raw_status=dispatch.raw_status,
-            state=dispatch.state,
-            branch_verified=True,
-            model_verified=dispatch.model_verified,
-            effort_verified=dispatch.effort_verified,
-        )
+        return replace(dispatch, branch_verified=True)
 
     @staticmethod
     def _workspace(info: dict[str, Any]) -> str:
