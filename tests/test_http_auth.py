@@ -17,6 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import httpx2
 import pytest
+from fastmcp import settings
 
 from operator_mcp.server import build_auth, build_server
 
@@ -77,6 +78,14 @@ def oidc_discovery_url() -> Iterator[str]:
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture(autouse=True)
+def isolated_fastmcp_settings(monkeypatch, tmp_path):
+    # Deliberately start with a different import-time home. Restore the
+    # singleton after each test; no OAuth state may leak between test cases.
+    monkeypatch.setattr(settings, "home", tmp_path / "unrelated-home")
+    monkeypatch.setenv("FASTMCP_HOME", str(tmp_path / "unrelated-home"))
 
 
 @asynccontextmanager
@@ -266,6 +275,9 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
 
     monkeypatch.setenv("FASTMCP_HOME", str(cfg.server.state_dir / "fastmcp"))
     proxy = build_auth(cfg)
+    assert settings.home == cfg.server.state_dir / "fastmcp"
+    assert (settings.home / "oauth-proxy").is_dir()
+    assert not (tmp_path / "unrelated-home" / "oauth-proxy").exists()
     async with running_app(
         make_cfg, oidc_discovery_url, monkeypatch, tmp_path, auth=proxy
     ) as client:
@@ -362,11 +374,15 @@ async def _assert_refresh_rotation(cfg, initial_upstream, client_id, issued):
     app = build_server(cfg, auth=rebuilt).http_app(path="/mcp")
     transport = httpx2.ASGITransport(app=app)
     with patch.object(rebuilt, "_upstream_oauth_client", synthetic_upstream):
-        async with app.lifespan(app), httpx2.AsyncClient(
-            transport=transport, base_url=PUBLIC_URL
-        ) as client:
+        async with (
+            app.lifespan(app),
+            httpx2.AsyncClient(transport=transport, base_url=PUBLIC_URL) as client,
+        ):
             refreshed = await client.post("/token", data=form)
-            assert refreshed.status_code == 200
+            assert refreshed.status_code == 200, (
+                refreshed.status_code,
+                refreshed.json().get("error"),
+            )
             rotated = refreshed.json()
             assert rotated["access_token"] != issued["access_token"]
             assert rotated["refresh_token"] != issued["refresh_token"]
