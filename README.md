@@ -21,6 +21,15 @@ The longer-term direction is a context-efficient, composable gateway: independen
 
 The Python package and CLI currently retain the historical `operator-mcp` name. The commands below intentionally use that name.
 
+## Connect a client
+
+After deploying Kule, follow the guide for your MCP client:
+
+- [ChatGPT](docs/clients/chatgpt.md)
+- [Claude](docs/clients/claude.md)
+
+Start with a least-privilege identity and verify the connection before enabling additional capabilities.
+
 ## Architecture
 
 - **Authentication.** FastMCP's OIDC proxy performs OAuth 2.1 with PKCE (S256) against
