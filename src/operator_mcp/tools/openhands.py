@@ -523,6 +523,8 @@ class _ScopedClient(httpx2.AsyncClient):
         # Rebuild framing from the configured URL and the serialized body.
         # Inbound Host, Content-Length and Transfer-Encoding are never trusted.
         host = request.url.host
+        if ":" in host:
+            host = f"[{host}]"
         port = request.url.port
         default_port = 443 if request.url.scheme == "https" else 80
         if port is not None and port != default_port:
