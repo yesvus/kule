@@ -79,15 +79,17 @@ has no repository filter, so this cannot be passed upstream:
 - `oh_list_conversations` asks Canvas for one bounded page (maximum 100 items), then
   returns only items whose native `tags.kulerepo` exactly matches the requested
   repository. When a page has no match it follows a bounded number of native pages
-  (at most 5) and returns `truncated: true` if the scan stopped early. Legacy
-  conversations without `kulerepo` are omitted and remain explicitly unclassified
-  until an operator verifies their mapping.
-- The returned continuation is a signed gateway cursor (`gc1.*`), not Canvas's
-  `next_page_id`. Canvas derives `next_page_id` from the next global conversation,
-  which can belong to another repository, so returning it would disclose an excluded
-  ID. The cursor only encodes the last session ID already returned to this caller.
-  Callers pass the cursor back as `page_id`; a stale or tampered cursor is denied
-  instead of silently restarting from the first page.
+  (at most 5), sets `truncated: true` and returns a resumable cursor if the scan
+  stopped early. Legacy conversations without `kulerepo` are omitted and remain
+  explicitly unclassified until an operator verifies their mapping.
+- The returned continuation is an encrypted, authenticated gateway cursor
+  (`gc1.*`), not Canvas's `next_page_id`. Canvas derives `next_page_id` from the next
+  global conversation, which can belong to another repository, so returning it would
+  disclose an excluded ID; the sealed cursor keeps every native ID opaque. Callers
+  pass the cursor back as `page_id`; a stale or tampered cursor is denied instead of
+  silently restarting from the first page. A scan that reaches the page bound without
+  a match still returns a resumable cursor, so the caller can continue past the bound
+  rather than receive `truncated: true` with no continuation.
 - Direct-ID reads and actions (`get`, runtime, events, event, send message, rename,
   run, interrupt, pause, model switch) require `repository` and first read the native
   conversation tags. A missing tag, a different tag, or an unverifiable preflight is
@@ -104,14 +106,27 @@ does not add a second session registry or database.
 
 ### Safe response projection
 
-Conversation responses are projected to lifecycle fields before leaving the gateway:
-ID, title, status, timestamps, tags, `working_dir`/workspace kind, iteration and budget
-limits, current/available model metadata, metrics, parent/sub/fork identifiers and the
-launched profile ID. Canvas's `ConversationInfo` also carries the secret registry, hook
-definitions, agent settings and state, blocked-action messages and a remote workspace
-API key; those fields are dropped even if a future Canvas version adds them to the
-response. `launched_agent_profile` is reduced to its profile ID, so `secret_refs` and
-`integration_refs` do not leave the gateway.
+Conversation responses (`oh_start_conversation`, `oh_get_conversation` and the items
+returned by `oh_list_conversations`) are projected to lifecycle fields before leaving
+the gateway: ID, title, `execution_status`, timestamps, tags, `working_dir`/workspace
+kind, iteration and budget limits, current/available model metadata, metrics,
+parent/sub/fork identifiers and the launched profile ID. Canvas's `ConversationInfo`
+also carries the secret registry, hook definitions, agent settings and state,
+blocked-action messages and a remote workspace API key; those fields are dropped even
+if a future Canvas version adds them to the response. `launched_agent_profile` is
+reduced to its profile ID, so `secret_refs` and `integration_refs` do not leave the
+gateway.
+
+The other response shapes are not projected and are passed through as their native
+Canvas types: `oh_start_conversation`/`oh_get_conversation`/list items are the only
+`ConversationInfo` responses, `oh_rename_conversation`, `oh_run_conversation`,
+`oh_interrupt_conversation`, `oh_pause_conversation`, `oh_send_message` and
+`oh_switch_acp_model` return Canvas's `Success` object, `oh_get_conversation_runtime`
+returns `ConversationRuntimeInfo`, `oh_list_agent_profiles` returns the profile
+summary records and the event tools return native session events. Those shapes do not
+contain the conversation secret registry, hook definitions, workspace API key or
+profile secret references, but event payloads are session data and should still be
+treated as sensitive operator content.
 
 
 ### Launch request reduction
@@ -144,11 +159,13 @@ cannot rewrite tags, budgets or other metadata. Unknown or extra arguments fail
 closed rather than being silently dropped.
 
 FastMCP merges inbound MCP HTTP headers into the outbound Canvas request. The adapter
-therefore sends only a fixed header allowlist: the dedicated service key plus normal
-transport headers. Caller-supplied `X-OpenHands-Observability-Tags`, `Authorization`,
-`Cookie`, tracing headers and similar values are removed before the request leaves
-the gateway. `oh_interrupt_conversation` is the native stop operation;
-`oh_pause_conversation` is the cooperative alternative.
+therefore sends only a fixed header allowlist of normal transport headers and re-applies
+the configured service key after filtering. Caller-supplied
+`X-OpenHands-Observability-Tags`, `X-Session-API-Key`, `Authorization`, `Cookie`,
+tracing headers and similar values are removed or replaced before the request leaves
+the gateway, so an inbound header cannot override the Canvas credential.
+`oh_interrupt_conversation` is the native stop operation; `oh_pause_conversation` is
+the cooperative alternative.
 
 
 ## Authorization and audit
@@ -163,8 +180,10 @@ the gateway. `oh_interrupt_conversation` is the native stop operation;
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
   does not create a client or contact Canvas. When the adapter is disabled, none of
   those settings are required.
-- Conversation responses are projected onto the safe lifecycle schema described
-  above; raw Canvas objects are never returned.
+- Conversation responses (`oh_start_conversation`, `oh_get_conversation` and
+  `oh_list_conversations` items) are projected onto the safe lifecycle schema described
+  above. Other Canvas response types are returned as their native summary or event
+  shapes; see the projection scope above.
 - Audit metadata includes the requested repository. The repository tag is written by
   the adapter at launch; callers cannot silently relabel a conversation.
 - The shared HOME, UID and worktree are not a security boundary. The exact

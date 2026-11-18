@@ -198,8 +198,8 @@ HTTPS origin, a dedicated `X-Session-API-Key`, and an exact approved
 repository-to-path mapping. Session launch, rename, status, events, messaging,
 interrupt/pause and per-conversation ACP model switch are allowlisted and require an
 explicit repository scope backed by the native `kulerepo` tag; list continuations use
-a signed gateway cursor instead of Canvas's global page ID. Conversation responses are
-projected to lifecycle fields, and unapproved caller headers are stripped. Bash,
+an encrypted gateway cursor instead of Canvas's global page ID. Conversation responses
+are projected to lifecycle fields, and unapproved caller headers are stripped. Bash,
 files, secrets, settings, profile mutation, plugins and the separate Automation
 Service are not exposed. See [docs/openhands.md](docs/openhands.md) for the complete
 tool list, leg 2 interface and live-rollout gates. No live Canvas call or cluster
