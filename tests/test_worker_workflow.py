@@ -1194,6 +1194,28 @@ def test_evidence_parser_uses_last_block_and_accepts_blocker_only():
     assert blocker.blockers == ("no git access",)
 
 
+def test_agent_settings_allows_blank_command_and_empty_args():
+    settings = ww._agent_settings_from_profile(
+        {
+            "acp_server": "opencode",
+            "acp_model": DEFAULT_MODEL,
+            "acp_command": " ",
+            "acp_args": [""],
+        },
+        DEFAULT_MODEL,
+        None,
+    )
+    assert "acp_command" not in settings
+    assert settings["acp_args"] == [""]
+
+    with pytest.raises(WorkerError, match="custom ACP"):
+        ww._agent_settings_from_profile(
+            {"acp_server": "custom", "acp_model": DEFAULT_MODEL, "acp_command": ""},
+            DEFAULT_MODEL,
+            None,
+        )
+
+
 def test_prompt_carries_issue_scope_pr_and_blocker_contract():
     text = build_prompt(task())
     assert ISSUE in text
