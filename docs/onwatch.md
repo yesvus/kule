@@ -1,9 +1,10 @@
 # OnWatch quota integration (source-only)
 
 Status: **source-only**. The module, tests and this document do not deploy,
-restart or reconfigure Tezgah, OnWatch, Prometheus or Kule. `tools/onwatch.py`
-is not added to `server.build_server` yet. That keeps this change out of the
-shared server registry and the three #23 worker/auth/registry workstreams.
+restart or reconfigure Tezgah, OnWatch, Prometheus or Kule.
+`src/operator_mcp/tools/onwatch.py` is not added to `server.build_server` yet.
+That keeps this change out of the shared server registry and the three #23
+worker/auth/registry workstreams.
 
 ## Why this source
 
@@ -63,11 +64,13 @@ Per provider/window:
 - `status: stale` — polling is stale, or the reset timestamp is more than 900
   seconds in the past. The 900-second grace matches upstream's
   `OnwatchQuotaResetMissed` alert.
-- `status: unknown` — utilization, reset or health data is missing, invalid or
-  outside 0-100. Missing reset data is reported as `reset_status:
-  not_scheduled`; it is never interpreted as unlimited quota. A malformed or
-  out-of-range utilization returns `utilization_percent: null` and
-  `remaining_percent: null` rather than a clamped value.
+- `status: unknown` — utilization is missing, invalid or outside 0-100; a
+  present reset timestamp is invalid; or health data is absent. A missing reset
+  series is different: it is reported as `reset_status: not_scheduled` and does
+  not by itself make a valid window unknown. It is never interpreted as
+  unlimited quota. A malformed or out-of-range utilization returns
+  `utilization_percent: null` and `remaining_percent: null` rather than a
+  clamped value.
 - `status: fresh` — utilization is valid, health is fresh, and any reset is in
   the future or within the grace window.
 
@@ -79,8 +82,10 @@ as stale and must not be used for dispatch.
 Account aliases come only from `onwatch_account_info`. An alias that contains
 the raw account ID, including when formatted with separators, is omitted rather
 than partially redacted. Raw numeric account IDs and the metrics token are not
-included in tool output. When no safe alias exists, the output uses stable
-`account-1`, `account-2` labels derived from sorted non-visible IDs.
+included in tool output. The single-account sentinel is returned as
+`account: null`. Other unaliased accounts use deterministic `account-1`,
+`account-2` labels derived from sorted non-visible IDs within that snapshot;
+these labels are not cross-snapshot identities.
 
 ## Configuration
 
@@ -94,6 +99,11 @@ The integration is off unless the metrics origin is set.
 Set the endpoint and token through the existing secret-delivery/GitOps path;
 this change does not create or rotate either. If the token file is unset, the
 request is unauthenticated; the authenticated deployment should set it.
+
+Loopback HTTP is supported for an existing local OnWatch endpoint only under
+the deployment trust assumption that the local network path and the configured
+port are not reachable or impersonable by untrusted workloads. Use HTTPS for
+any non-loopback endpoint. The module does not send the token over a redirect.
 
 ## Proposed Kule wiring
 

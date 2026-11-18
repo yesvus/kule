@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import httpx2
@@ -101,8 +102,8 @@ def test_healthy_fixture_has_bounded_normalized_quota_and_no_raw_account_id():
     assert window["reset_in_seconds"] == HOUR
     assert window["status"] == "fresh"
     assert window["reasons"] == []
-    assert '"1"' not in str(result)
-    assert "Authorization" not in str(result)
+    assert '"1"' not in json.dumps(result, sort_keys=True)
+    assert "Authorization" not in json.dumps(result, sort_keys=True)
 
 
 def test_past_reset_is_stale_even_when_polling_is_healthy():
@@ -293,7 +294,7 @@ def test_alias_containing_raw_account_id_is_omitted():
 
     result = onwatch.summarize(samples, now=NOW)
     assert result["providers"][0]["account"] == "account-1"
-    assert account_id not in str(result)
+    assert account_id not in json.dumps(result, sort_keys=True)
 
 
 def test_stale_agent_marks_each_window_stale():
@@ -344,8 +345,8 @@ def test_numeric_accounts_are_labelled_without_raw_ids():
         )
     result = onwatch.summarize(onwatch.parse_metrics(_line(*lines)), now=NOW)
     assert [row["account"] for row in result["providers"]] == ["account-1", "account-2"]
-    assert "987654321" not in str(result)
-    assert "123456789" not in str(result)
+    assert "987654321" not in json.dumps(result, sort_keys=True)
+    assert "123456789" not in json.dumps(result, sort_keys=True)
 
 
 def test_absent_provider_is_unknown_not_invented():
@@ -369,7 +370,62 @@ def test_output_is_capped():
     lines.append(_metric(onwatch.AGENT_HEALTHY, {"provider": "codex", "account_id": "default"}, 1))
     result = onwatch.summarize(onwatch.parse_metrics(_line(*lines)), now=NOW)
     assert result["truncated"] is True
-    assert len(result["providers"][0]["windows"]) == onwatch.MAX_WINDOWS
+    row = result["providers"][0]
+    assert len(row["windows"]) == onwatch.MAX_WINDOWS
+    assert row["window_count"] == 400
+    assert row["stale_windows"] == 0
+
+
+def test_health_counts_use_full_window_list_before_display_cap():
+    lines = []
+    for index in range(400):
+        labels = {
+            "provider": "codex",
+            "quota_type": f"window-{index}",
+            "account_id": "default",
+        }
+        lines.append(_metric(onwatch.QUOTA_UTILIZATION, labels, 10))
+        lines.append(_metric(onwatch.QUOTA_RESET, labels, NOW - 30 * 24 * HOUR))
+    lines.append(_metric(onwatch.AGENT_HEALTHY, {"provider": "codex", "account_id": "default"}, 1))
+    result = onwatch.summarize(onwatch.parse_metrics(_line(*lines)), now=NOW)
+    row = result["providers"][0]
+    assert len(row["windows"]) == onwatch.MAX_WINDOWS
+    assert row["window_count"] == 400
+    assert row["stale_windows"] == 400
+    assert onwatch._health_view(result)["providers"][0]["stale_windows"] == 400
+
+
+def test_provider_filter_is_applied_before_output_caps():
+    lines = []
+    for index in range(onwatch.MAX_PROVIDERS + 5):
+        provider = f"provider_{index:03d}"
+        lines.append(
+            _metric(
+                onwatch.QUOTA_UTILIZATION,
+                {"provider": provider, "quota_type": "5h", "account_id": "default"},
+                10,
+            )
+        )
+        lines.append(
+            _metric(
+                onwatch.AGENT_HEALTHY,
+                {"provider": provider, "account_id": "default"},
+                1,
+            )
+        )
+    target = f"provider_{onwatch.MAX_PROVIDERS + 2:03d}"
+    result = onwatch.summarize(onwatch.parse_metrics(_line(*lines)), now=NOW, provider=target)
+    assert [row["provider"] for row in result["providers"]] == [target]
+    assert result["status"] == "fresh"
+
+
+def test_parser_preserves_unicode_line_separator_in_label_value():
+    text = (
+        'onwatch_quota_utilization_percent{provider="codex",'
+        'quota_type="5h\u2028x",account_id="default"} 10'
+    )
+    samples = onwatch.parse_metrics(text)
+    assert samples[0][1]["quota_type"] == "5h\u2028x"
 
 
 def test_malformed_metric_fails_closed():
@@ -515,10 +571,10 @@ async def test_register_is_off_without_configuration(monkeypatch):
 
 async def test_registered_tools_are_operator_only_read_only_and_bounded(monkeypatch, tmp_path):
     monkeypatch.setenv("KULE_ONWATCH_URL", "http://127.0.0.1:9211")
-    snapshot = onwatch.summarize(onwatch.parse_metrics(_fixture()), now=NOW)
+    samples = onwatch.parse_metrics(_fixture())
 
-    async def fake_snapshot(*, timeout_seconds: float) -> dict:
-        return snapshot
+    async def fake_snapshot(*, timeout_seconds: float, provider: str | None = None) -> dict:
+        return onwatch.summarize(samples, now=NOW, provider=provider)
 
     monkeypatch.setattr(onwatch, "fetch_snapshot", fake_snapshot)
     gateway, caller, audit = _gateway(tmp_path)
@@ -532,6 +588,7 @@ async def test_registered_tools_are_operator_only_read_only_and_bounded(monkeypa
             "onwatch_providers",
         }
         assert all(tool.annotations.read_only_hint for tool in tools.values())
+        assert all(tool.meta["fastmcp"]["tags"] == ["read"] for tool in tools.values())
         status = await client.call_tool("onwatch_quota_status", {})
         assert status.data["status"] == "fresh"
         filtered = await client.call_tool("onwatch_quota_status", {"provider": "codex"})

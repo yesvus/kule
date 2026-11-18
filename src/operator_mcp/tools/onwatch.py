@@ -174,7 +174,7 @@ def parse_metrics(text: str) -> list[tuple[str, dict[str, str], float | None]]:
     silently incomplete quota view.
     """
     samples: list[tuple[str, dict[str, str], float | None]] = []
-    for line_number, line in enumerate(text.splitlines(), 1):
+    for line_number, line in enumerate(text.split("\n"), 1):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
@@ -450,6 +450,8 @@ def summarize(
                     "health": health_status,
                     "agent_healthy": health_value,
                     "last_cycle_age_seconds": round(last_age, 1) if last_age is not None else None,
+                    "window_count": len(windows),
+                    "stale_windows": sum(window["status"] == "stale" for window in windows),
                     "windows": windows,
                 }
             )
@@ -496,7 +498,7 @@ async def _get_metrics(
         raise RuntimeError("OnWatch metrics response is not UTF-8") from None
 
 
-async def fetch_snapshot(*, timeout_seconds: float) -> dict:
+async def fetch_snapshot(*, timeout_seconds: float, provider: str | None = None) -> dict:
     """Fetch and normalize one on-demand snapshot; there is no background loop."""
     base_url = _base_url()
     if base_url is None:
@@ -512,7 +514,7 @@ async def fetch_snapshot(*, timeout_seconds: float) -> dict:
         samples = parse_metrics(text)
     except ValueError:
         raise RuntimeError("OnWatch returned invalid metrics") from None
-    return summarize(samples)
+    return summarize(samples, provider=provider)
 
 
 def _provider_or_none(provider: str | None) -> str | None:
@@ -533,8 +535,8 @@ def _health_view(snapshot: dict) -> dict:
             "health": row["health"],
             "agent_healthy": row["agent_healthy"],
             "last_cycle_age_seconds": row["last_cycle_age_seconds"],
-            "window_count": len(row["windows"]),
-            "stale_windows": sum(window["status"] == "stale" for window in row["windows"]),
+            "window_count": row["window_count"],
+            "stale_windows": row["stale_windows"],
         }
         for row in snapshot["providers"]
     ]
@@ -584,14 +586,7 @@ def register(mcp: FastMCP, *, timeout_seconds: float) -> None:
     ) -> dict:
         """Show provider/window utilization, reset time, and explicit data status."""
         selected = _provider_or_none(provider)
-        snapshot = await fetch_snapshot(timeout_seconds=timeout_seconds)
-        if selected is not None:
-            snapshot = {
-                **snapshot,
-                "providers": [row for row in snapshot["providers"] if row["provider"] == selected],
-            }
-            snapshot["status"] = _overall_status(row["status"] for row in snapshot["providers"])
-        return snapshot
+        return await fetch_snapshot(timeout_seconds=timeout_seconds, provider=selected)
 
     @mcp.tool(tags={READ}, annotations=annotations)
     async def onwatch_quota_health() -> dict:
