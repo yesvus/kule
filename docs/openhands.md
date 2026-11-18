@@ -62,6 +62,7 @@ existing operator group; untagged tools fail closed.
 | `oh_interrupt_conversation` | `POST /api/conversations/{id}/interrupt` | operate |
 | `oh_pause_conversation` | `POST /api/conversations/{id}/pause` | operate |
 | `oh_switch_acp_model` | `POST /api/conversations/{id}/switch_acp_model` | operate |
+| `oh_switch_acp_effort` | `POST /api/conversations/{id}/switch_acp_effort` | operate |
 
 List and event search keep the upstream `limit` maximum of 100. Kule's existing
 `tools.max_output_bytes` still refuses an oversized serialized result rather than
@@ -98,8 +99,8 @@ has no repository filter, so this cannot be passed upstream:
   because a rename can move an already-scanned conversation and skip an unread one.
   `oh_list_conversations` advertises only the stable creation-order values.
 - Direct-ID reads and actions (`get`, runtime, events, event, send message, rename,
-  run, interrupt, pause, model switch) require `repository` and first read the native
-  conversation tags. A missing tag, a different tag, or an unverifiable preflight is
+  run, interrupt, pause, model switch, effort switch) require `repository` and first
+  read the native conversation tags. A missing tag, a different tag, or an unverifiable preflight is
   denied before the requested action. There is no unscoped ID bypass.
 - `oh_search_events` keeps the native event filters (`kind`, `source`, `body`,
   `sort_order`, `timestamp__gte`, `timestamp__lt`) and bounded `limit`/`page_id`
@@ -131,7 +132,7 @@ The other response shapes are not projected and are passed through as their nati
 Canvas types: `oh_start_conversation`/`oh_get_conversation`/list items are the only
 `ConversationInfo` responses, `oh_rename_conversation`, `oh_run_conversation`,
 `oh_interrupt_conversation`, `oh_pause_conversation`, `oh_send_message` and
-`oh_switch_acp_model` return Canvas's `Success` object, `oh_get_conversation_runtime`
+`oh_switch_acp_model` and `oh_switch_acp_effort` return Canvas's `Success` object, `oh_get_conversation_runtime`
 returns `ConversationRuntimeInfo`, `oh_list_agent_profiles` returns the profile
 summary records and the event tools return native session events. Those shapes do not
 contain the conversation secret registry, hook definitions, workspace API key or
@@ -188,8 +189,9 @@ the cooperative alternative.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
 - A call-time target guard validates the approved repository mapping, conversation
   UUIDs, the exact repository path, worktree option shape, text-only messages, numeric
-  bounds, profile presence and model identifier syntax before any action. Direct-ID
-  actions also verify the native `kulerepo` tag with a read-only preflight.
+  bounds, profile presence, model identifier syntax and effort identifier syntax before
+  any action. Direct-ID actions also verify the native `kulerepo` tag with a read-only
+  preflight.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
   does not create a client or contact Canvas. When the adapter is disabled, none of
@@ -239,7 +241,10 @@ A session dispatcher can use only these tools:
    If verification fails, stop the session; do not fall back to the source checkout.
 3. If an exact per-conversation model override is required,
    `oh_switch_acp_model(repository, conversation_id, model)` with the verified catalog
-   ID. The stored profile is unchanged.
+   ID. The stored profile is unchanged. If a distinct reasoning effort is required,
+   call `oh_switch_acp_effort(repository, conversation_id, effort)` with the exact
+   server-reported or separately verified value (for example `high`), and re-read
+   session metadata before dispatch. Do not substitute a different effort silently.
 4. `oh_send_message(repository, ..., run: false)` followed by
    `oh_run_conversation(repository, ...)` when the task must start only after
    verification. `oh_send_message(..., run: true)` is a single-call alternative. If

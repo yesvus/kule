@@ -45,6 +45,7 @@ OPERATE_TOOLS = {
     "oh_interrupt_conversation",
     "oh_pause_conversation",
     "oh_switch_acp_model",
+    "oh_switch_acp_effort",
 }
 
 
@@ -626,6 +627,44 @@ async def test_direct_id_actions_require_matching_native_repository_tag(gateway)
         ("GET", f"/api/conversations/{CONVERSATION}"),
         ("PATCH", f"/api/conversations/{CONVERSATION}"),
     ]
+
+
+async def test_effort_switch_is_scoped_and_validated(gateway):
+    mcp, _, _ = gateway
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.method == "GET":
+            cid = request.url.path.rsplit("/", 1)[-1]
+            repo = REPOSITORY if cid == CONVERSATION else OTHER_REPOSITORY
+            return httpx2.Response(200, json={"id": cid, "tags": {"kulerepo": repo}})
+        return httpx2.Response(200, json={"ok": True})
+
+    args = {"repository": REPOSITORY, "conversation_id": CONVERSATION, "effort": "high"}
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            for invalid in ("bad effort", "", "a" * 65, "-high", ".high"):
+                with pytest.raises(ToolError, match="effort identifier"):
+                    await caller.call_tool("oh_switch_acp_effort", {**args, "effort": invalid})
+                _assert_no_request(requests)
+            with pytest.raises(ToolError, match="outside the requested repository"):
+                await caller.call_tool(
+                    "oh_switch_acp_effort", {**args, "conversation_id": OTHER_CONVERSATION}
+                )
+            result = await caller.call_tool("oh_switch_acp_effort", args)
+            assert result.data == {"ok": True}
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", f"/api/conversations/{OTHER_CONVERSATION}"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
+        ("POST", f"/api/conversations/{CONVERSATION}/switch_acp_effort"),
+    ]
+    assert json.loads(requests[-1].content) == {"effort": "high"}
+    assert openhands.audit_arguments("oh_switch_acp_effort", args)["effort"] == "high"
 
 
 def _full_conversation(conversation_id: str) -> dict:

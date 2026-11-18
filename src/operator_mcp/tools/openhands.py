@@ -44,6 +44,7 @@ _SPEC = Path(__file__).resolve().parent.parent / "openapi" / "openhands-1.62.0.j
 _SPEC_VERSION = "1.62.0"
 _API_KEY_HEADER = "X-Session-API-Key"
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_EFFORT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _REPOSITORY = re.compile(r"^(?!\.{1,2}/)(?!.*/\.{1,2}$)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
 _BRANCH_PREFIX = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]{0,200})?$")
@@ -220,6 +221,15 @@ _ENDPOINTS: dict[str, _Endpoint] = {
             frozenset({"conversation_id"}),
         )
     ),
+    "switch_conversation_acp_effort_api_conversations__conversation_id__switch_acp_effort_post": (
+        _Endpoint(
+            "switch_acp_effort",
+            OPERATE,
+            "post",
+            "/api/conversations/{conversation_id}/switch_acp_effort",
+            frozenset({"conversation_id"}),
+        )
+    ),
 }
 
 _START_FIELDS = frozenset(
@@ -248,6 +258,7 @@ _AUDIT_FIELDS = frozenset(
         "kind",
         "source",
         "model",
+        "effort",
         "title",
         "agent_profile_id",
         "worktree",
@@ -862,6 +873,14 @@ class _TargetGuard(Middleware):
             model = arguments.get("model")
             if not isinstance(model, str) or not _MODEL.fullmatch(model):
                 raise AuthorizationError("OpenHands model identifier is not permitted")
+            await self._verify_repository(repository, conversation_id)
+        elif name == "switch_acp_effort":
+            repository, conversation_id = self._scope(
+                arguments, {"repository", "conversation_id", "effort"}
+            )
+            effort = arguments.get("effort")
+            if not isinstance(effort, str) or not _EFFORT.fullmatch(effort):
+                raise AuthorizationError("OpenHands effort identifier is not permitted")
             await self._verify_repository(repository, conversation_id)
         elif name == "rename_conversation":
             repository, conversation_id = self._scope(
