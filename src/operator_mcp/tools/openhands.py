@@ -376,7 +376,9 @@ def _tls_verify(env: Mapping[str, str] | None = None) -> bool | ssl.SSLContext:
             raise ValueError("invalid CA path")
         return ssl.create_default_context(cafile=raw)
     except (OSError, ValueError):
-        raise RuntimeError("KULE_OPENHANDS_CA_FILE must be an absolute readable CA bundle") from None
+        raise RuntimeError(
+            "KULE_OPENHANDS_CA_FILE must be an absolute readable CA bundle"
+        ) from None
 
 
 def validate_settings(env: Mapping[str, str] | None = None) -> None:
