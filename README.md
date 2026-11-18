@@ -189,3 +189,14 @@ The independent GitOps PR must pass exact-head review, RBAC
 `kubectl auth can-i` negatives and the live disposable token read
 before replacing the existing digest. SentinelX remains available for
 break-glass until the Kule operator functionality is independently tested.
+
+## Optional OpenHands Agent Canvas management (source-only, off by default)
+
+`KULE_OPENHANDS_ENABLED=1` mounts a reviewed subset of the OpenHands Agent Canvas
+management API imported from the pinned 1.62.0 OpenAPI schema. It requires a fixed
+HTTPS origin, a dedicated `X-Session-API-Key`, and an approved workspace root.
+Conversation launch, status, events, messaging, stop and per-conversation ACP model
+switch are allowlisted; bash, files, secrets, settings, profile mutation, plugins and
+the separate Automation Service are not exposed. See [docs/openhands.md](docs/openhands.md)
+for the contract, leg 2 interface and live-rollout gates. No live Canvas call or
+cluster change is included.

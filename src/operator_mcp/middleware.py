@@ -180,6 +180,11 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
             "script_sha256": metadata.get("sha256"),
             "script_valid": metadata["valid"],
         }
+    if tool.startswith("oh_"):
+        # Store routing metadata and a prompt digest, never message bodies.
+        from .tools.openhands import audit_arguments
+
+        return audit_arguments(tool, args)
     if tool == "workspace_exec":
         metadata = _audit_text_digest(args.get("command"), 4096)
         return {
