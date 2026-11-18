@@ -31,11 +31,16 @@ FastMCP 4.2.0 `FastMCP.from_openapi()` and reduces the upstream schema before mo
 | `KULE_OPENHANDS_ENABLED` | Must be exactly `1`; default off. |
 | `KULE_OPENHANDS_API_URL` | One fixed **HTTPS** origin, optional port, no path/query/userinfo. |
 | `KULE_OPENHANDS_API_KEY` | Dedicated Canvas service key, sent only as `X-Session-API-Key`. Never a browser cookie or shared operator credential. |
+| `KULE_OPENHANDS_CA_FILE` | Optional absolute path to a readable public CA PEM bundle for the configured HTTPS listener. Required for the planned private-CA Tezgah listener. If unset, normal client TLS trust applies; if set but invalid, startup and `check-config` fail closed when the adapter is enabled. |
 | `KULE_OPENHANDS_REPOSITORIES` | JSON object mapping each approved canonical `owner/name` to its exact Canvas source path, for example `{"yesvus/kule":"/workspace/src/kule"}`. Required; 1–64 entries; no path root, `..`, duplicate name or duplicate path. |
 
 The HTTP client pins the origin, disables redirects and ignores proxy environment
 variables, so the service key cannot follow a redirect or an ambient proxy to another
 host. The key is never a tool argument and is not written to the audit log.
+An explicit CA bundle is loaded into an integration-local SSLContext with certificate
+and hostname verification enabled; other Kule clients are unchanged. Mount only the
+public CA, never its signing key. Do not rely on `SSL_CERT_FILE` or disable TLS
+verification.
 
 The native Canvas listener is currently plain HTTP on port 8000. This adapter rejects
 `http://` because that would send the service key in cleartext. Enabling it in a Pod
@@ -194,8 +199,8 @@ the cooperative alternative.
   preflight.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
-  does not create a client or contact Canvas. When the adapter is disabled, none of
-  those settings are required.
+  does not create a client or contact Canvas; it validates the CA bundle when set.
+  When the adapter is disabled, none of those settings are required.
 - Conversation responses (`oh_start_conversation`, `oh_get_conversation` and
   `oh_list_conversations` items) are projected onto the safe lifecycle schema described
   above. Other Canvas response types are returned as their native summary or event

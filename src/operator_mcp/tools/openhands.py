@@ -22,6 +22,7 @@ import math
 import os
 import posixpath
 import re
+import ssl
 import uuid
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
@@ -364,9 +365,26 @@ def settings_from_env(env: Mapping[str, str] | None = None) -> tuple[dict[str, s
     return repositories, origin, key
 
 
+def _tls_verify(env: Mapping[str, str] | None = None) -> bool | ssl.SSLContext:
+    """Use explicit integration-local trust, never ambient CA or proxy settings."""
+    values = os.environ if env is None else env
+    if "KULE_OPENHANDS_CA_FILE" not in values:
+        return True
+    raw = values["KULE_OPENHANDS_CA_FILE"]
+    try:
+        if not raw or raw != raw.strip() or not Path(raw).is_absolute():
+            raise ValueError("invalid CA path")
+        return ssl.create_default_context(cafile=raw)
+    except (OSError, ValueError):
+        raise RuntimeError(
+            "KULE_OPENHANDS_CA_FILE must be an absolute readable CA bundle"
+        ) from None
+
+
 def validate_settings(env: Mapping[str, str] | None = None) -> None:
-    """Side-effect-free preflight shared by check-config and mount."""
+    """Offline config preflight: validate settings and explicitly configured trust."""
     settings_from_env(env)
+    _tls_verify(env)
 
 
 @lru_cache(maxsize=1)
@@ -556,7 +574,9 @@ class _ScopedClient(httpx2.AsyncClient):
         return await super().send(request, **kwargs)
 
 
-def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient:
+def _client(
+    origin: str, key: str, timeout_seconds: float, *, verify: bool | ssl.SSLContext = True
+) -> httpx2.AsyncClient:
     return _ScopedClient(
         base_url=origin,
         headers={_API_KEY_HEADER: key},
@@ -564,6 +584,7 @@ def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient
         timeout=max(1.0, min(20.0, timeout_seconds - 1.0)),
         follow_redirects=False,
         trust_env=False,
+        verify=verify,
     )
 
 
@@ -1150,7 +1171,7 @@ def mount(
     if client is None:
         origin = _origin(os.environ.get("KULE_OPENHANDS_API_URL", ""))
         api_key = _api_key(os.environ.get("KULE_OPENHANDS_API_KEY", ""))
-        client = _client(origin, api_key, timeout_seconds)
+        client = _client(origin, api_key, timeout_seconds, verify=_tls_verify())
         lifespan = _closing_lifespan(client)
 
     backend = FastMCP.from_openapi(
