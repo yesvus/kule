@@ -17,9 +17,11 @@ from fastmcp.exceptions import AuthorizationError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools.base import Tool, ToolResult
+from fastmcp.utilities.versions import VersionSpec
 
 from .audit import AuditLog
-from .authz import Caller, Policy
+from .authz import Caller, Policy, Role
+from .integrations import IntegrationRegistry, is_integration_tool
 
 ClaimsGetter = Callable[[], Mapping[str, Any] | None]
 
@@ -27,6 +29,42 @@ ClaimsGetter = Callable[[], Mapping[str, Any] | None]
 def claims_from_request() -> Mapping[str, Any] | None:
     token = get_access_token()
     return token.claims if token is not None else None
+
+
+def _requested_version(message: mt.CallToolRequestParams) -> VersionSpec | None:
+    """Recover the version selector FastMCP will use for this dispatch.
+
+    FastMCP carries an explicit ``call_tool(version=...)`` selector in
+    ``_meta.fastmcp.version`` and uses the same value for dispatch, so
+    authorizing this resolved tool matches the tool that actually runs.
+    """
+    meta = getattr(message, "meta", None)
+    if not isinstance(meta, Mapping):
+        return None
+    fastmcp_meta = meta.get("fastmcp")
+    if not isinstance(fastmcp_meta, Mapping):
+        return None
+    raw = fastmcp_meta.get("version")
+    if isinstance(raw, str) and raw:
+        return VersionSpec(eq=raw)
+    if isinstance(raw, Mapping):
+        fields = {key: raw[key] for key in ("gte", "lt", "eq") if isinstance(raw.get(key), str)}
+        if fields:
+            return VersionSpec(**fields)
+    return None
+
+
+def _tool_parameter_names(tool: Tool) -> frozenset[str] | None:
+    """Return the complete schema argument set, or None when it is unreadable."""
+    parameters = tool.parameters
+    if not isinstance(parameters, Mapping):
+        return None
+    properties = parameters.get("properties", {})
+    if not isinstance(properties, Mapping):
+        return None
+    if any(not isinstance(name, str) for name in properties):
+        return None
+    return frozenset(properties)
 
 
 class OperatorMiddleware(Middleware):
@@ -38,6 +76,7 @@ class OperatorMiddleware(Middleware):
         timeout_seconds: float,
         max_output_bytes: int = 64 * 1024,
         claims_getter: ClaimsGetter = claims_from_request,
+        integrations: IntegrationRegistry | None = None,
     ) -> None:
         self.policy = policy
         self.audit = audit
@@ -45,6 +84,7 @@ class OperatorMiddleware(Middleware):
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         self.claims_getter = claims_getter
+        self.integrations = integrations
 
     async def _audit(self, event: str, **fields: Any) -> None:
         # flock + fsync block; keep them off the event loop.
@@ -59,6 +99,44 @@ class OperatorMiddleware(Middleware):
     def _caller(self) -> Caller | None:
         return self.policy.caller_from_claims(self.claims_getter())
 
+    def _roles(self, caller: Caller | None) -> frozenset[Role]:
+        return self.policy.roles(caller)
+
+    def _update_who(
+        self, who: dict[str, Any], caller: Caller | None, roles: frozenset[Role]
+    ) -> None:
+        who.update(
+            user=caller.username if caller else None,
+            sub=caller.subject if caller else None,
+            roles=sorted(role.value for role in roles),
+        )
+
+    def _authorize(
+        self,
+        tool: Tool,
+        caller: Caller | None,
+        roles: frozenset[Role],
+        args: Mapping[str, Any],
+        parameter_names: frozenset[str] | None,
+    ) -> tuple[bool, str, str | None]:
+        if is_integration_tool(tool.tags):
+            # Role/capability/target policy is authoritative for integration
+            # tools; legacy tier tags must not widen or bypass it.
+            if self.integrations is None:
+                return False, "integration registry unavailable", "integration"
+            ok, reason = self.integrations.authorize(
+                roles, tool.tags, args, parameter_names=parameter_names
+            )
+            return ok, reason, "integration"
+        return (*self.policy.allows(caller, tool.tags), self.policy.tier_of(tool.tags))
+
+    def _annotate_integration(self, tool: Tool, who: dict[str, Any]) -> None:
+        if self.integrations is None:
+            return
+        identity = self.integrations.describe(tool.tags)
+        if identity is not None:
+            who["integration"], who["backend_identity"] = identity
+
     async def on_list_tools(
         self,
         context: MiddlewareContext[mt.ListToolsRequest],
@@ -66,7 +144,32 @@ class OperatorMiddleware(Middleware):
     ) -> Sequence[Tool]:
         tools = await call_next(context)
         caller = self._caller()
-        return [t for t in tools if self.policy.allows(caller, t.tags)[0]]
+        roles = self._roles(caller)
+        visible: list[Tool] = []
+        defaults: dict[str, Tool | None] = {}
+        for tool in tools:
+            if is_integration_tool(tool.tags):
+                # A name-only call dispatches the highest version. Do not
+                # advertise an older version that the same name-only call
+                # cannot reach; explicit version selectors are still allowed
+                # at call time.
+                if tool.name not in defaults:
+                    defaults[tool.name] = (
+                        await context.fastmcp_context.fastmcp.get_tool(tool.name)
+                        if context.fastmcp_context is not None
+                        else None
+                    )
+                default = defaults[tool.name]
+                if default is None or default.version != tool.version:
+                    continue
+                if (
+                    self.integrations is not None
+                    and self.integrations.discovery_allowed(roles, tool.tags)[0]
+                ):
+                    visible.append(tool)
+            elif self.policy.allows(caller, tool.tags)[0]:
+                visible.append(tool)
+        return visible
 
     async def on_call_tool(
         self,
@@ -78,12 +181,9 @@ class OperatorMiddleware(Middleware):
         args = dict(context.message.arguments or {})
         audit_args = _audit_arguments(name, args)
         caller = self._caller()
-        who = {
-            "call_id": call_id,
-            "tool": name,
-            "user": caller.username if caller else None,
-            "sub": caller.subject if caller else None,
-        }
+        roles = self._roles(caller)
+        who = {"call_id": call_id, "tool": name}
+        self._update_who(who, caller, roles)
 
         if self.kill_switch.exists():
             await self._audit("denied", reason="kill switch", args=audit_args, **who)
@@ -91,12 +191,22 @@ class OperatorMiddleware(Middleware):
 
         tool = None
         if context.fastmcp_context is not None:
-            tool = await context.fastmcp_context.fastmcp.get_tool(name)
+            tool = await context.fastmcp_context.fastmcp.get_tool(
+                name, version=_requested_version(context.message)
+            )
         if tool is None:
             await self._audit("denied", reason="unknown tool", args=audit_args, **who)
             raise AuthorizationError(f"tool '{name}' is not available")
 
-        ok, reason = self.policy.allows(caller, tool.tags)
+        # Recompute after the lookup await so a short-lived role is evaluated
+        # against the request that is about to be dispatched.
+        caller = self._caller()
+        roles = self._roles(caller)
+        self._update_who(who, caller, roles)
+        self._annotate_integration(tool, who)
+        parameter_names = _tool_parameter_names(tool)
+
+        ok, reason, tier = self._authorize(tool, caller, roles, args, parameter_names)
         if not ok:
             await self._audit("denied", reason=reason, args=audit_args, **who)
             # Keep the policy detail in the audit record, not in the response.
@@ -119,8 +229,26 @@ class OperatorMiddleware(Middleware):
                 )
                 raise AuthorizationError("Argo CD endpoint override is not permitted") from None
 
-        tier = self.policy.tier_of(tool.tags)
+        # Record the authorized attempt before dispatch so a crash or
+        # cancellation remains auditable. If the post-wait check below rejects,
+        # the following denied record states that call_next never ran.
         await self._audit("call", tier=tier, args=audit_args, **who)
+
+        # The audit write yields. Recheck the same policy immediately before
+        # dispatch so a break-glass grant cannot expire in that window.
+        caller = self._caller()
+        roles = self._roles(caller)
+        self._update_who(who, caller, roles)
+        ok, reason, _ = self._authorize(tool, caller, roles, args, parameter_names)
+        if not ok:
+            await self._audit(
+                "denied",
+                reason=f"authorization changed before dispatch: {reason}",
+                args=audit_args,
+                **who,
+            )
+            raise AuthorizationError("not authorized")
+
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already
         # running in a worker thread cannot be interrupted; host tools must

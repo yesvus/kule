@@ -72,7 +72,7 @@ Do not grant `pods` list/watch, Kubernetes Secrets, production `pods/exec`, cros
 
 ## Authorization and security gates
 
-- `[tools] workspace_enabled=false` and `[tools] developer_enabled=false` remain the defaults. The separate `mcp-workspace` group is required in either case. Existing operator callers additionally need `mcp-gurbet-operators`; the new **source-only** non-operator developer path additionally needs `mcp-developers` plus explicit enablement of both flags. This PR does not provision an Authentik/machine identity, credentials, network policy, or live operator gateway rollout (ops #1108).
+- `[tools] workspace_enabled=false` and `[tools] developer_enabled=false` remain the defaults. The separate `mcp-workspace` group is required in either case. Existing operator callers additionally need `mcp-gurbet-operators`; the new **source-only** non-operator developer path additionally needs `mcp-developers` plus explicit enablement of both flags and `developer_isolation_verified`. This PR does not provision an Authentik/machine identity, credentials, network policy, or live operator gateway rollout (ops #1108).
 - **P0: ops #731 credential isolation.** The new `tezgah/home` was migrated from the legacy Coder HOME. Verify that no broad personal GitHub PAT or personal SSH private key is accessible to UID 10001 before enabling remotely callable `workspace_exec`. If necessary, first switch to repo-scoped GitHub App tokens and remove only the developer-side legacy credential copies, never the Gurbet operator's credentials. Do not inspect or print token contents.
 - Validate live `can-i` with the **actual projected** workspace token: yes for exactly the approved Pod's `pods/exec create`, no for other Pods/namespaces, Secrets and production workloads. Verify inherited ClusterRoleBindings do not expand rights.
 - Review GitOps ServiceAccount/Role/RoleBinding, token/CA projection, DNS/NetworkPolicy, exact target Pod name and image digest separately. Preserve Kule's existing OAuth state and current deployed read-only observer until selective release approval.
@@ -97,6 +97,7 @@ developer_group = "mcp-developers"      # new developer identity
 [tools]
 workspace_enabled = false              # leave disabled until #731 and targeted Pod RBAC
 developer_enabled = false              # extra gate for non-operator workspace access
+developer_isolation_verified = false   # shared-HOME/credential isolation gate
 ```
 
 Effective policy (both tool discovery and call-time authorization):
@@ -104,12 +105,14 @@ Effective policy (both tool discovery and call-time authorization):
 | Caller groups | Read/operate Kubernetes & notes | Workspace | Global exec |
 | --- | --- | --- | --- |
 | `mcp-gurbet-operators` | Existing operator grants | Requires `mcp-workspace` and `workspace_enabled` | Existing dedicated exec group plus opt-in |
-| `mcp-developers` + `mcp-workspace`, no operator group | **No** | Only when **both** `workspace_enabled` and `developer_enabled` are true | **No** |
+| `mcp-developers` + `mcp-workspace`, no operator group | **No** | Only when `workspace_enabled`, `developer_enabled` and `developer_isolation_verified` are all true | **No** |
 | `mcp-developers` alone | **No** | **No** | **No** |
 | `mcp-workspace` alone | **No** | **No** | **No** |
 | Unauthenticated/other | **No** | **No** | **No** |
 
 This is a **source capability only**, not a provisioned machine OAuth client, Authentik group, JWT issuer, independent namespace ServiceAccount, or a secure worker sandbox. Full enablement is blocked by #731 (legacy broad GitHub PAT/personal SSH key in migrated shared HOME), and by review of Kule's exact-Pod Tezgah `pods/exec` identity, negative Kubernetes rights, and actual authenticated non-operator agent token behavior. Separate worker identities must be verified end to end; never assign cheap agents `mcp-gurbet-operators` as a workaround.
+
+The three-role Developer/Operator/Break-glass policy, exact-target registry and the separate `developer_isolation_verified` hard gate for general developer/PR-worker activation are documented in [ws-oh-auth.md](ws-oh-auth.md). That gate is also source-only and remains false until the credential isolation above is accepted.
 
 **Limit:** All Tezgah agents sharing UID 10001/HOME remain in the *same trust domain*. `workspace_exec` can read all files available to that UID. Git worktrees are concurrency organization, not permission isolation. For a stricter reader-only agent, use a separate backend/credential boundary rather than giving it a shell or relabeling unrestricted Kubernetes reads as observer-safe.
 

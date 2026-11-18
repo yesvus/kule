@@ -31,6 +31,13 @@ The exec tier remains disabled.
   - `operate`: needs `required_group`.
   - `exec`: needs `required_group` and `exec_group`, and `tools.exec_enabled = true`.
   Anything not allowed is hidden from the tool list and denied at call time.
+- **Roles and targets.** Opt-in integrations declare capabilities governed by the
+  Developer, Operator or Break-glass roles, plus exact target allowlists. Role is
+  derived only from authenticated groups/claims, never from a model or profile
+  name. Every tool argument must be declared as an exact target or an explicit
+  non-target input. Integration tools are denied if the registry is missing,
+  disabled, any declared target is absent, or an argument is outside the policy.
+  See [docs/ws-oh-auth.md](docs/ws-oh-auth.md). This is source-only and default-off.
 - **Kill switch.** If the file `<state_dir>/DISABLED` exists, every tool call is refused.
   Remove the file to re-enable. The refusal is audited.
 - **Audit log.** Append-only JSONL. Each record stores the SHA-256 of the previous line.
@@ -80,6 +87,9 @@ oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
 client_id = "operator-mcp"
 required_group = "mcp-operators"
 exec_group = "mcp-exec"
+workspace_group = "mcp-workspace"
+developer_group = "mcp-developers"
+breakglass_group = "mcp-breakglass"
 groups_claim = "groups"
 # allowed_client_redirect_uris = [...]  # defaults to ChatGPT + exact Claude callback
 
@@ -88,6 +98,11 @@ path = "/var/log/operator-mcp/audit.jsonl"
 
 [tools]
 exec_enabled = false
+workspace_enabled = false            # default-off; needs pinned Tezgah Pod identity
+developer_enabled = false            # default-off; non-operator workspace path
+developer_isolation_verified = false # hard gate for the general Developer role
+breakglass_enabled = false           # default-off; needs a bounded expiry claim
+breakglass_max_ttl_seconds = 900     # 60 to 3600
 scratch_dir = "/var/lib/operator-mcp/scratch"
 timeout_seconds = 30       # 1 to 110
 max_output_bytes = 65536  # 1024 to 1048576; larger results are refused and audited
