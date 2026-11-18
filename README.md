@@ -80,6 +80,8 @@ oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
 client_id = "operator-mcp"
 required_group = "mcp-operators"
 exec_group = "mcp-exec"
+anki_read_group = "mcp-anki-read"   # independent; does not inherit operator access
+anki_write_group = "mcp-anki-write"
 groups_claim = "groups"
 # allowed_client_redirect_uris = [...]  # defaults to ChatGPT + exact Claude callback
 
@@ -160,6 +162,33 @@ have been verified. Kubernetes access is a separate reviewed rollout.
   An optional read-only Kubernetes observer would require a dedicated,
   short-lived projected ServiceAccount identity in a separate rollout;
   its token must never appear in tool output or audit logs.
+
+## Optional AnkiMCP proxy (source-only until companion ops rollout)
+
+Set `KULE_ANKI_MCP_URL=http://anki-mcp.anki.svc.cluster.local:3142/mcp` to
+mount the existing AnkiMCP server through Kule's Streamable HTTP proxy. The
+endpoint is fixed and validated; it is not accepted as a tool argument. Ops
+must provide the private same-Pod adapter and an ingress NetworkPolicy that
+allows only the Kule Pod before this setting is deployed. Kule's OAuth caller
+identity is authorized independently by `anki_read_group` and
+`anki_write_group`; operator and developer groups do not imply either role.
+
+The `anki_` tool namespace exposes only `listDecks`, `findNotes`, and
+`notesInfo` to Anki readers, plus duplicate-aware `addNotes` and
+`updateNoteFields` to Anki writers. Batch creation refuses explicit duplicate
+allowance and is capped at 25 notes. Note updates reject media URL arguments.
+Delete, sync, scheduling, model mutation, media access, resources, prompts,
+and every unreviewed upstream tool remain unavailable. Anki arguments and
+error text are omitted from audit records; the shared middleware still records
+caller, tool, duration, and result size. Upstream discovery/call failures are
+isolated to Anki tools so Kule's other tools remain available.
+
+The proxy is not registered unless `KULE_ANKI_MCP_URL` is configured. Keep the
+existing managed tunnel and collection writer in place until the separate ops
+rollout has verified the private adapter and Kule path. Clients must
+rediscover tools after the setting is enabled. Rollback by removing
+`KULE_ANKI_MCP_URL` and restarting Kule; the Anki tools disappear while the
+existing collection writer and managed tunnel continue unchanged.
 
 ## Optional Kubernetes read-only overview (NOT LIVE until separate GitOps rollout)
 

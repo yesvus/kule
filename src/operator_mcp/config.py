@@ -52,6 +52,32 @@ def validate_k8s_api_url(raw: str, setting: str = "KULE_K8S_API_URL") -> str | N
     return base
 
 
+def validate_anki_mcp_url(raw: str) -> str | None:
+    """Accept only the agreed private Anki MCP Service endpoint."""
+    if not raw:
+        return None
+    if raw != raw.strip() or "?" in raw or "#" in raw:
+        raise ConfigError("KULE_ANKI_MCP_URL must be the fixed private MCP endpoint")
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        raise ConfigError("KULE_ANKI_MCP_URL must be the fixed private MCP endpoint") from None
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "anki-mcp.anki.svc.cluster.local"
+        or parsed.port != 3142
+        or parsed.path != "/mcp"
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or port != 3142
+    ):
+        raise ConfigError("KULE_ANKI_MCP_URL must be the fixed private MCP endpoint")
+    return raw
+
+
 @dataclass(frozen=True)
 class ServerConfig:
     host: str = "127.0.0.1"
@@ -76,6 +102,8 @@ class AuthConfig:
     jwt_signing_key: str = field(default="", repr=False)
     workspace_group: str = "mcp-workspace"
     developer_group: str = "mcp-developers"
+    anki_read_group: str = "mcp-anki-read"
+    anki_write_group: str = "mcp-anki-write"
 
 
 @dataclass(frozen=True)
@@ -174,6 +202,8 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
         workspace_group=_str(a.get("workspace_group", "mcp-workspace"), "auth.workspace_group"),
         developer_group=_str(a.get("developer_group", "mcp-developers"), "auth.developer_group"),
+        anki_read_group=_str(a.get("anki_read_group", "mcp-anki-read"), "auth.anki_read_group"),
+        anki_write_group=_str(a.get("anki_write_group", "mcp-anki-write"), "auth.anki_write_group"),
         groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
@@ -197,6 +227,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     )
     # check-config validates the opt-in before any server startup.
     validate_k8s_api_url(env.get("KULE_K8S_API_URL", ""))
+    validate_anki_mcp_url(env.get("KULE_ANKI_MCP_URL", ""))
     workspace_api = validate_k8s_api_url(
         env.get("KULE_WORKSPACE_API_URL", ""), "KULE_WORKSPACE_API_URL"
     )
@@ -238,11 +269,13 @@ def validate(cfg: Config) -> None:
         cfg.auth.exec_group,
         cfg.auth.workspace_group,
         cfg.auth.developer_group,
+        cfg.auth.anki_read_group,
+        cfg.auth.anki_write_group,
     )
     if any(not group for group in groups):
         raise ConfigError("auth role groups must not be empty")
-    if len(set(groups)) != 4:
-        raise ConfigError("auth role groups must differ")
+    if len(set(groups)) != 6:
+        raise ConfigError("authorization groups must differ")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
     if not 1 <= cfg.tools.timeout_seconds <= 110:

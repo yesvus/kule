@@ -140,9 +140,10 @@ class OperatorMiddleware(Middleware):
             await self._audit("cancelled", duration_ms=_ms(start), **who)
             raise
         except Exception as exc:
-            await self._audit(
-                "error", duration_ms=_ms(start), error=type(exc).__name__, detail=str(exc), **who
-            )
+            fields = {"duration_ms": _ms(start), "error": type(exc).__name__}
+            if not name.startswith("anki_"):
+                fields["detail"] = str(exc)
+            await self._audit("error", **fields, **who)
             raise
         size = _result_size(result)
         if size > self.max_output_bytes:
@@ -166,7 +167,9 @@ def _audit_text_digest(value: Any, max_bytes: int) -> dict[str, Any]:
 
 
 def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
-    """Sanitize Argo origin overrides and hash bounded Tezgah arguments."""
+    """Sanitize upstream origins and omit personal Anki note content."""
+    if tool.startswith("anki_"):
+        return {"argument_count": len(args)}
     if tool.startswith("argocd_"):
         sanitized = dict(args)
         sanitized.pop("argocdBaseUrl", None)

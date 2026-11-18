@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from typing import Any
 
 READ, OPERATE, EXEC, WORKSPACE = "read", "operate", "exec", "workspace"
-TIERS = (READ, OPERATE, EXEC, WORKSPACE)
+ANKI_READ, ANKI_WRITE = "anki_read", "anki_write"
+TIERS = (READ, OPERATE, EXEC, WORKSPACE, ANKI_READ, ANKI_WRITE)
 
 
 @dataclass(frozen=True)
@@ -44,6 +45,8 @@ class Policy:
     workspace_enabled: bool = False
     developer_group: str = "mcp-developers"
     developer_enabled: bool = False
+    anki_read_group: str = "mcp-anki-read"
+    anki_write_group: str = "mcp-anki-write"
 
     def __post_init__(self) -> None:
         for name in (
@@ -51,6 +54,8 @@ class Policy:
             "exec_group",
             "workspace_group",
             "developer_group",
+            "anki_read_group",
+            "anki_write_group",
             "groups_claim",
         ):
             value = getattr(self, name)
@@ -59,10 +64,19 @@ class Policy:
         if not isinstance(self.exec_enabled, bool):
             raise ValueError("exec_enabled must be a bool")
         if (
-            len({self.required_group, self.exec_group, self.workspace_group, self.developer_group})
-            != 4
+            len(
+                {
+                    self.required_group,
+                    self.exec_group,
+                    self.workspace_group,
+                    self.developer_group,
+                    self.anki_read_group,
+                    self.anki_write_group,
+                }
+            )
+            != 6
         ):
-            raise ValueError("required, exec and workspace groups must differ")
+            raise ValueError("authorization groups must differ")
         if not isinstance(self.workspace_enabled, bool):
             raise ValueError("workspace_enabled must be a bool")
         if not isinstance(self.developer_enabled, bool):
@@ -88,6 +102,14 @@ class Policy:
         tier = self.tier_of(tags)
         if tier is None:
             return False, "tool has no single tier tag"
+        if tier == ANKI_READ:
+            if self.anki_read_group not in caller.groups:
+                return False, f"caller is not in {self.anki_read_group}"
+            return True, "ok"
+        if tier == ANKI_WRITE:
+            if self.anki_write_group not in caller.groups:
+                return False, f"caller is not in {self.anki_write_group}"
+            return True, "ok"
         operator = self.required_group in caller.groups
         if tier == WORKSPACE:
             if not self.workspace_enabled:

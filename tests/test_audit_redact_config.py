@@ -66,6 +66,29 @@ def test_config_loads_with_env_secrets(tmp_path):
     cfg = load_config(write(tmp_path, GOOD), ENV)
     assert cfg.auth.client_secret == "s"
     assert "client_secret" not in repr(cfg.auth)
+    assert cfg.auth.anki_read_group == "mcp-anki-read"
+    assert cfg.auth.anki_write_group == "mcp-anki-write"
+
+
+def test_config_accepts_only_the_agreed_private_anki_endpoint(tmp_path):
+    endpoint = "http://anki-mcp.anki.svc.cluster.local:3142/mcp"
+    cfg = load_config(write(tmp_path, GOOD), {**ENV, "KULE_ANKI_MCP_URL": endpoint})
+    assert cfg.auth.anki_read_group == "mcp-anki-read"
+    for bad in (
+        "https://anki-mcp.anki.svc.cluster.local:3142/mcp",
+        "http://example.com:3142/mcp",
+        "http://anki-mcp.anki.svc.cluster.local:3142/",
+        "http://anki-mcp.anki.svc.cluster.local:3142/mcp?target=x",
+        "http://user@anki-mcp.anki.svc.cluster.local:3142/mcp",
+    ):
+        with pytest.raises(ConfigError, match="fixed private MCP endpoint"):
+            load_config(write(tmp_path, GOOD), {**ENV, "KULE_ANKI_MCP_URL": bad})
+
+
+def test_config_rejects_overlapping_anki_groups(tmp_path):
+    config = GOOD + '\nanki_read_group = "mcp-anki-write"\n'
+    with pytest.raises(ConfigError, match="authorization groups must differ"):
+        load_config(write(tmp_path, config), ENV)
 
 
 @pytest.mark.parametrize(

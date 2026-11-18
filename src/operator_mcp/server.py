@@ -13,7 +13,15 @@ from .audit import AuditLog
 from .authz import Policy
 from .config import Config
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
-from .tools import basic, host_exec, kubernetes, upstream_argocd, upstream_kubernetes, workspace
+from .tools import (
+    basic,
+    host_exec,
+    kubernetes,
+    upstream_anki,
+    upstream_argocd,
+    upstream_kubernetes,
+    workspace,
+)
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -72,6 +80,8 @@ def build_server(
         workspace_enabled=cfg.tools.workspace_enabled,
         developer_group=cfg.auth.developer_group,
         developer_enabled=cfg.tools.developer_enabled,
+        anki_read_group=cfg.auth.anki_read_group,
+        anki_write_group=cfg.auth.anki_write_group,
     )
     audit = AuditLog(cfg.audit.path)
     middleware = OperatorMiddleware(
@@ -96,4 +106,6 @@ def build_server(
         upstream_kubernetes.mount(mcp)
     if os.environ.get("KULE_ARGOCD_UPSTREAM_ENABLED") == "1":
         upstream_argocd.mount(mcp)
+    if os.environ.get("KULE_ANKI_MCP_URL"):
+        upstream_anki.mount(mcp)
     return mcp

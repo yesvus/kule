@@ -1,6 +1,6 @@
 import pytest
 
-from operator_mcp.authz import EXEC, OPERATE, READ, Policy
+from operator_mcp.authz import ANKI_READ, ANKI_WRITE, EXEC, OPERATE, READ, Policy
 
 P = Policy(required_group="ops", exec_group="ops-exec", exec_enabled=True)
 
@@ -144,3 +144,29 @@ def test_developer_group_must_be_distinct_and_enablement_bool():
         Policy("ops", "ops-exec", False, developer_group="mcp-workspace")
     with pytest.raises(ValueError):
         Policy("ops", "ops-exec", False, developer_enabled="true")
+
+
+def test_anki_permissions_are_independent_of_operator_and_each_other():
+    policy = Policy(
+        required_group="ops",
+        exec_group="ops-exec",
+        exec_enabled=False,
+        anki_read_group="anki-readers",
+        anki_write_group="anki-writers",
+    )
+    operator = policy.caller_from_claims({"sub": "operator", "groups": ["ops"]})
+    reader = policy.caller_from_claims({"sub": "reader", "groups": ["anki-readers"]})
+    writer = policy.caller_from_claims({"sub": "writer", "groups": ["anki-writers"]})
+    assert policy.allows(operator, {ANKI_READ})[0] is False
+    assert policy.allows(operator, {ANKI_WRITE})[0] is False
+    assert policy.allows(reader, {ANKI_READ}) == (True, "ok")
+    assert policy.allows(reader, {ANKI_WRITE})[0] is False
+    assert policy.allows(writer, {ANKI_WRITE}) == (True, "ok")
+    assert policy.allows(writer, {ANKI_READ})[0] is False
+
+
+def test_anki_groups_must_be_distinct_from_all_other_groups():
+    with pytest.raises(ValueError, match="groups must differ"):
+        Policy("ops", "exec", False, anki_read_group="ops")
+    with pytest.raises(ValueError, match="groups must differ"):
+        Policy("ops", "exec", False, anki_write_group="mcp-anki-read")
