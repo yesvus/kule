@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from fastmcp import FastMCP
+from fastmcp import FastMCP, settings
 from fastmcp.server.auth import AuthProvider
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
@@ -47,9 +47,12 @@ class AuthentikRefreshOIDCProxy(OIDCProxy):
 
 
 def build_auth(cfg: Config) -> AuthProvider:
-    # Keep FastMCP's encrypted OAuth state under our state directory.
-    # Set unconditionally: an inherited value must not redirect or share it.
-    os.environ["FASTMCP_HOME"] = str(cfg.server.state_dir / "fastmcp")
+    # FastMCP snapshots its settings at import time; updating only the env
+    # would not change the already-loaded OAuth storage location. This server
+    # owns one FastMCP configuration per process.
+    home = cfg.server.state_dir / "fastmcp"
+    os.environ["FASTMCP_HOME"] = str(home)
+    settings.home = home
     return AuthentikRefreshOIDCProxy(
         config_url=cfg.auth.oidc_config_url,
         client_id=cfg.auth.client_id,
