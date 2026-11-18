@@ -6,7 +6,9 @@ empty JWKS, which is enough for FastMCP's OIDC proxy to start and to reject bad 
 
 from __future__ import annotations
 
+import asyncio
 import json
+import multiprocessing
 import threading
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -230,19 +232,19 @@ async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
         assert unauthenticated.status_code == 401
 
 
+@pytest.mark.parametrize("fresh_process", [False, True], ids=["rebuild", "spawn"])
 async def test_issued_refresh_rotates_after_proxy_rebuild(
-    make_cfg, oidc_discovery_url, monkeypatch, tmp_path
+    make_cfg, oidc_discovery_url, monkeypatch, tmp_path, fresh_process
 ):
     """Real proxy token exchanges; stub only upstream refresh transport.
 
     Seed synthetic callback state rather than simulating browser consent.
-    This does not verify Authentik JWTs, process restart or ChatGPT link state.
+    The spawn case starts a fresh interpreter using the same disk state.
+    Neither case verifies Authentik JWTs or actual ChatGPT link state.
     """
     import base64
     import hashlib
     import time
-    from unittest.mock import AsyncMock
-
     from fastmcp.server.auth.oauth_proxy.models import ClientCode
 
     base = make_cfg()
@@ -305,8 +307,34 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
         assert issued["refresh_token"] != initial_upstream["refresh_token"]
         assert issued["access_token"] != initial_upstream["access_token"]
 
+    if fresh_process:
+        # Spawn, not fork: no inherited Python cache, proxy or storage object.
+        # Only synthetic OAuth data and the config cross the process boundary.
+        process = multiprocessing.get_context("spawn").Process(
+            target=_refresh_in_child, args=(cfg, initial_upstream, client_id, issued)
+        )
+        process.start()
+        try:
+            await asyncio.to_thread(process.join, 45)
+            assert not process.is_alive(), "OAuth restart regression timed out"
+            assert process.exitcode == 0, "fresh process could not rotate the token"
+        finally:
+            if process.is_alive():
+                process.kill()
+                process.join(5)
+            process.close()
+    else:
+        await _assert_refresh_rotation(cfg, initial_upstream, client_id, issued)
+
+
+def _refresh_in_child(cfg, initial_upstream, client_id, issued):
+    asyncio.run(_assert_refresh_rotation(cfg, initial_upstream, client_id, issued))
+
+
+async def _assert_refresh_rotation(cfg, initial_upstream, client_id, issued):
+    from unittest.mock import AsyncMock, patch
+
     rebuilt = build_auth(cfg)
-    assert rebuilt is not proxy
     upstream = AsyncMock()
     upstream.refresh_token.side_effect = [
         {
@@ -325,44 +353,46 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
     async def synthetic_upstream():
         yield upstream
 
-    monkeypatch.setattr(rebuilt, "_upstream_oauth_client", synthetic_upstream)
     form = {
         "grant_type": "refresh_token",
         "client_id": client_id,
         "refresh_token": issued["refresh_token"],
     }
-    async with running_app(
-        make_cfg, oidc_discovery_url, monkeypatch, tmp_path, auth=rebuilt
-    ) as client:
-        refreshed = await client.post("/token", data=form)
-        assert refreshed.status_code == 200
-        rotated = refreshed.json()
-        assert rotated["access_token"] != issued["access_token"]
-        assert rotated["refresh_token"] != issued["refresh_token"]
-        assert rotated["refresh_token"] != "synthetic-idp-refresh-2"
-        assert upstream.refresh_token.await_count == 1
-        assert (
-            upstream.refresh_token.await_args.kwargs["refresh_token"]
-            == initial_upstream["refresh_token"]
-        )
+    app = build_server(cfg, auth=rebuilt).http_app(path="/mcp")
+    transport = httpx2.ASGITransport(app=app)
+    with patch.object(rebuilt, "_upstream_oauth_client", synthetic_upstream):
+        async with app.lifespan(app), httpx2.AsyncClient(
+            transport=transport, base_url=PUBLIC_URL
+        ) as client:
+            refreshed = await client.post("/token", data=form)
+            assert refreshed.status_code == 200
+            rotated = refreshed.json()
+            assert rotated["access_token"] != issued["access_token"]
+            assert rotated["refresh_token"] != issued["refresh_token"]
+            assert rotated["refresh_token"] != "synthetic-idp-refresh-2"
+            assert upstream.refresh_token.await_count == 1
+            assert (
+                upstream.refresh_token.await_args.kwargs["refresh_token"]
+                == initial_upstream["refresh_token"]
+            )
 
-        replay = await client.post("/token", data=form)
-        assert replay.status_code == 401
-        assert replay.json()["error"] == "invalid_grant"
-        assert "access_token" not in replay.json()
-        assert upstream.refresh_token.await_count == 1
+            replay = await client.post("/token", data=form)
+            assert replay.status_code == 401
+            assert replay.json()["error"] == "invalid_grant"
+            assert "access_token" not in replay.json()
+            assert upstream.refresh_token.await_count == 1
 
-        # The new proxy refresh token must use the rotated upstream credential.
-        again = await client.post(
-            "/token", data={**form, "refresh_token": rotated["refresh_token"]}
-        )
-        assert again.status_code == 200
-        assert upstream.refresh_token.await_count == 2
-        assert (
-            upstream.refresh_token.await_args.kwargs["refresh_token"] == "synthetic-idp-refresh-2"
-        )
-        assert again.json()["refresh_token"] != rotated["refresh_token"]
-        assert again.json()["refresh_token"] != "synthetic-idp-refresh-3"
+            # The new proxy refresh token must use the rotated upstream credential.
+            again = await client.post(
+                "/token", data={**form, "refresh_token": rotated["refresh_token"]}
+            )
+            assert again.status_code == 200
+            assert upstream.refresh_token.await_count == 2
+            assert (
+                upstream.refresh_token.await_args.kwargs["refresh_token"] == "synthetic-idp-refresh-2"
+            )
+            assert again.json()["refresh_token"] != rotated["refresh_token"]
+            assert again.json()["refresh_token"] != "synthetic-idp-refresh-3"
 
 
 async def test_garbage_bearer_token_is_rejected(
