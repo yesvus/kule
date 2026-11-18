@@ -81,17 +81,19 @@ class Policy:
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
-        groups = {
+        core_groups = {
             self.required_group,
             self.exec_group,
             self.workspace_group,
             self.developer_group,
-            self.breakglass_group,
         }
-        if len(groups) != 5:
-            raise ValueError(
-                "required, exec, workspace, developer and breakglass groups must differ"
-            )
+        if len(core_groups) != 4:
+            raise ValueError("required, exec, workspace and developer groups must differ")
+        # Break-glass is opt-in. A legacy configuration may already reuse the
+        # default break-glass name for another group; that must stay valid while
+        # break-glass is disabled, but a collision is rejected once enabled.
+        if self.breakglass_enabled and self.breakglass_group in core_groups:
+            raise ValueError("breakglass group must differ from other role groups")
         for name in ("exec_enabled", "workspace_enabled", "developer_enabled"):
             if not isinstance(getattr(self, name), bool):
                 raise ValueError(f"{name} must be a bool")
@@ -167,6 +169,11 @@ class Policy:
             if not operator:
                 if not self.developer_enabled:
                     return False, "developer workspace access is disabled"
+                # The legacy workspace tier is the developer's shell path. It
+                # must not bypass the same shared-UID/HOME gate as the canonical
+                # Developer role.
+                if not self.developer_isolation_verified:
+                    return False, "developer isolation gate is not verified"
                 if self.developer_group not in caller.groups:
                     return False, "caller is not in developer group"
             return True, "ok"
@@ -184,5 +191,10 @@ def _timestamp(raw: Any) -> float | None:
     """Accept only a finite non-boolean number; malformed claims grant nothing."""
     if isinstance(raw, bool) or not isinstance(raw, int | float):
         return None
-    value = float(raw)
+    try:
+        value = float(raw)
+    except (OverflowError, TypeError, ValueError):
+        # Arbitrarily large integers cannot be represented as a float. Treat
+        # them as malformed instead of failing the whole request.
+        return None
     return value if math.isfinite(value) and value > 0 else None

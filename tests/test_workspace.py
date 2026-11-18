@@ -268,7 +268,11 @@ async def test_developer_group_lists_only_workspace_and_call_time_denies_operato
         return {"path": payload.get("path"), "text": "safe"}
 
     monkeypatch.setattr(workspace, "_invoke", fake_invoke)
-    cfg = make_cfg(workspace_enabled=True, developer_enabled=True)
+    cfg = make_cfg(
+        workspace_enabled=True,
+        developer_enabled=True,
+        developer_isolation_verified=True,
+    )
     mcp = build_server(cfg, claims_getter=claims)
 
     claims.value = {"sub": "dev-one", "groups": ["mcp-developers", "mcp-workspace"]}

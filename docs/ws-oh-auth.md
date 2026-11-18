@@ -28,10 +28,17 @@ grant that is missing, expired, or longer than the configured maximum TTL yields
 no role. Preserve an independent out-of-band recovery path; this source does not
 make break-glass usable when Authentik or Kule is unavailable.
 
-The legacy `read/operate/exec/workspace` tiers in `authz.py` remain unchanged for
-existing tools so a source merge does not alter the current Operator endpoint.
-Integration tools use the role/capability/target registry instead; their legacy
-tier tags are ignored, so a tier tag cannot widen access.
+The legacy `read/operate/exec` tiers in `authz.py` remain unchanged for existing
+tools so a source merge does not alter the current Operator endpoint. The legacy
+non-operator `workspace` path now also requires
+`tools.developer_isolation_verified`, because `workspace_exec` is the same
+shared-UID/HOME exposure the gate exists to block. Integration tools use the
+role/capability/target registry instead; their legacy tier tags are ignored, so
+a tier tag cannot widen access.
+
+`tools.developer_enabled` in TOML also requires `tools.workspace_enabled`, and
+the loader then requires a workspace API origin plus matching pinned and approved
+Pod names. This change does not add a separate integration-only activation path.
 
 ## 2. Capability and exact-target policy
 
@@ -39,20 +46,30 @@ tier tags are ignored, so a tier tag cannot widen access.
 declares:
 
 - a stable lowercase `name`;
-- `enabled` (default-off at construction);
-- a non-secret `backend_identity` (for audit/ownership, not authentication);
-- the exact capabilities it may serve;
-- every target-bearing argument with an **exact** allowlist of strings.
+- `enabled` as a required constructor argument; pass `False` explicitly for the
+  default-off state;
+- a non-secret `backend_identity` (emitted in integration audit records, not used
+  for authentication);
+- the exact capabilities it may serve, which the global role map governs;
+- every target-bearing argument with an **exact** allowlist of strings;
+- every non-target argument in `inputs`, such as a script body.
 
-Deny conditions at both discovery and call time:
+Deny conditions at call time:
 
 - unknown, duplicate, or disabled integration;
 - missing/duplicate integration or capability tag;
 - capability not declared by that integration;
 - no active role includes the capability;
-- a declared target argument is missing, not a string, or outside the exact list;
+- a tool argument that is in neither `targets` nor `inputs`, including one that
+  is optional or missing from the supplied call;
+- a supplied argument that is absent from the tool schema;
+- a declared target argument that is missing, not a string, or outside the exact
+  list;
 - wildcard/prefix target values, which are rejected when the integration is
   registered.
+
+Discovery checks role and capability only; missing or out-of-list targets are
+call-time denials, and wildcard declarations are registration errors.
 
 Targets are resource arguments such as `repository`, `namespace`,
 `acp_profile`, `host` or `profile`. Full endpoint allowlisting, Kubernetes RBAC,
@@ -69,10 +86,12 @@ tools:
 from operator_mcp.integrations import (
     Capability,
     Integration,
+    IntegrationRegistry,
     capability_tag,
     integration_tag,
 )
 
+registry = IntegrationRegistry()
 registry.register(
     Integration(
         name="openhands",
@@ -85,6 +104,7 @@ registry.register(
             "repository": frozenset({"yesvus/kule"}),
             "acp_profile": frozenset({"opencode"}),
         },
+        inputs=frozenset(),  # non-target arguments, if any
     )
 )
 
@@ -146,10 +166,14 @@ All of the following must be independently verified before setting
 5. Audit shows role, tool, call id, bounded argument metadata and denial reason;
    no credential values are logged.
 6. A disposable end-to-end worker launch, UI visibility, intervention,
-   cancellation and own-PR flow is reviewed on the live environment.
+   cancellation and own-PR flow is reviewed on the live environment in an
+   owner-approved, isolated acceptance deployment where the gate is enabled only
+   for the disposable test, not on the general Developer path.
 
-Only then may a reviewed GitOps change set the gate. Source merge is not live
-activation. The existing `workspace_enabled`/`developer_enabled` flags and the
+Steps 1-5 can be verified before step 6. The general Developer path remains
+closed while step 6 is exercised only in the isolated acceptance deployment.
+Only after all six may a reviewed GitOps change set the gate generally. Source
+merge is not live activation. The existing `workspace_enabled`/`developer_enabled` flags and the
 new gate remain `false` in `yesvus/ops`.
 
 ## 5. Acceptance evidence in this change
@@ -157,16 +181,23 @@ new gate remain `false` in `yesvus/ops`.
 `tests/test_integrations.py` covers:
 
 - Developer role requires both enablement and the isolation gate;
+- the legacy non-operator workspace path requires the same gate;
 - model/client/ACP-profile claims grant no role;
 - break-glass requires separate activation and a fresh bounded expiry;
+- an expiring break-glass grant is rechecked immediately before dispatch;
 - break-glass does not inherit Operator capabilities;
 - duplicate integrations, wildcards, missing targets and malformed tags fail
   closed;
+- undeclared tool schema arguments and undeclared supplied arguments fail closed;
+- one-shot tag iterators resolve the same policy on discovery and call;
+- oversized `breakglass_exp` values grant no role instead of raising;
+- legacy configurations keep loading while break-glass is disabled;
 - Developer can launch only the exact allowed repository/profile;
 - Developer is denied credential apply, Argo sync, host exec and break-glass;
 - Operator fixture writes are limited to the exact non-production target;
 - disabled integrations are denied for every role;
-- server-level discovery filtering, direct-call denial and audit reasons.
+- server-level discovery filtering, direct-call denial, backend identity in audit
+  records, and denial reasons.
 
 Run:
 

@@ -31,12 +31,13 @@ The exec tier remains disabled.
   - `operate`: needs `required_group`.
   - `exec`: needs `required_group` and `exec_group`, and `tools.exec_enabled = true`.
   Anything not allowed is hidden from the tool list and denied at call time.
-- **Roles and targets.** Opt-in integrations can additionally declare Developer,
-  Operator or Break-glass roles, a capability and exact target allowlists. Role is
+- **Roles and targets.** Opt-in integrations declare capabilities governed by the
+  Developer, Operator or Break-glass roles, plus exact target allowlists. Role is
   derived only from authenticated groups/claims, never from a model or profile
-  name. Integration tools are denied if the registry is missing, disabled, or the
-  target is absent or outside the exact list. See
-  [docs/ws-oh-auth.md](docs/ws-oh-auth.md). This is source-only and default-off.
+  name. Every tool argument must be declared as an exact target or an explicit
+  non-target input. Integration tools are denied if the registry is missing,
+  disabled, any declared target is absent, or an argument is outside the policy.
+  See [docs/ws-oh-auth.md](docs/ws-oh-auth.md). This is source-only and default-off.
 - **Kill switch.** If the file `<state_dir>/DISABLED` exists, every tool call is refused.
   Remove the file to re-enable. The refusal is audited.
 - **Audit log.** Append-only JSONL. Each record stores the SHA-256 of the previous line.

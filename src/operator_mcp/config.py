@@ -251,17 +251,22 @@ def validate(cfg: Config) -> None:
         raise ConfigError(f"{SECRET_ENV['jwt_signing_key']} must be at least 32 characters")
     if not cfg.auth.groups_claim:
         raise ConfigError("auth.groups_claim must not be empty")
-    groups = (
+    core_groups = (
         cfg.auth.required_group,
         cfg.auth.exec_group,
         cfg.auth.workspace_group,
         cfg.auth.developer_group,
-        cfg.auth.breakglass_group,
     )
+    groups = (*core_groups, cfg.auth.breakglass_group)
     if any(not group for group in groups):
         raise ConfigError("auth role groups must not be empty")
-    if len(set(groups)) != 5:
-        raise ConfigError("auth role groups must differ")
+    if len(set(core_groups)) != 4:
+        raise ConfigError("auth required, exec, workspace and developer groups must differ")
+    # A legacy config can reuse the default break-glass group name for another
+    # role. That is harmless while break-glass is disabled, but must not make an
+    # existing deployment fail config validation after upgrade.
+    if cfg.tools.breakglass_enabled and cfg.auth.breakglass_group in core_groups:
+        raise ConfigError("auth breakglass group must differ while breakglass is enabled")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")
     if not 1 <= cfg.tools.timeout_seconds <= 110:

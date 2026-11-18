@@ -12,6 +12,8 @@ The registry then enforces, at discovery and call time:
 
 * the integration is registered and explicitly enabled;
 * the authenticated caller has a role that includes the capability;
+* every tool argument is declared as either an exact target or an explicitly
+  non-target input, so an undeclared routing argument fails closed;
 * every declared target argument is present and exactly allowlisted.
 
 Targets are exact strings, never prefixes, globs or model-supplied aliases. A
@@ -118,8 +120,11 @@ def capability_tag(capability: Capability) -> str:
 
 
 def is_integration_tool(tags: Iterable[str]) -> bool:
-    return any(t.startswith(INTEGRATION_TAG_PREFIX) for t in tags) or any(
-        t.startswith(CAPABILITY_TAG_PREFIX) for t in tags
+    # Materialize: callers may pass a one-shot iterator and both prefixes must
+    # be checked against the same set of tags.
+    return any(
+        t.startswith(INTEGRATION_TAG_PREFIX) or t.startswith(CAPABILITY_TAG_PREFIX)
+        for t in tuple(tags)
     )
 
 
@@ -134,6 +139,10 @@ class Integration:
     # Argument name -> exact allowlisted values. Every target-bearing argument
     # that the tools accept must be declared here.
     targets: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    # Tool arguments that are payload or metadata rather than routing targets.
+    # This is an explicit allowlist: an argument in neither targets nor inputs
+    # is a policy error, not a pass-through.
+    inputs: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not _NAME.fullmatch(self.name):
@@ -170,10 +179,20 @@ class Integration:
             if not exact:
                 raise ValueError(f"target {argument} must not be empty")
             targets[argument] = frozenset(exact)
+        if isinstance(self.inputs, str) or not isinstance(self.inputs, Iterable):
+            raise ValueError("integration inputs must be an iterable of argument names")
+        inputs: set[str] = set()
+        for argument in self.inputs:
+            if not isinstance(argument, str) or not _ARGUMENT.fullmatch(argument):
+                raise ValueError("input arguments must be lowercase identifiers")
+            inputs.add(argument)
+        if inputs & targets.keys():
+            raise ValueError("input and target argument names must differ")
         if capabilities - _UNSCOPED and not targets:
             raise ValueError("target-bearing capabilities require exact targets")
         object.__setattr__(self, "capabilities", capabilities)
         object.__setattr__(self, "targets", MappingProxyType(targets))
+        object.__setattr__(self, "inputs", frozenset(inputs))
 
 
 class IntegrationRegistry:
@@ -197,8 +216,16 @@ class IntegrationRegistry:
     def names(self) -> frozenset[str]:
         return frozenset(self._integrations)
 
+    def describe(self, tags: Iterable[str]) -> tuple[str, str] | None:
+        """Return the enabled integration's name and backend identity for audit."""
+        spec, _, _ = self._resolve(tags)
+        if spec is None:
+            return None
+        return spec.name, spec.backend_identity
+
     def discovery_allowed(self, roles: Iterable[Role], tags: Iterable[str]) -> tuple[bool, str]:
         """Role/capability check used to filter tool discovery; targets not known yet."""
+        tags = tuple(tags)
         spec, capability, reason = self._resolve(tags)
         if spec is None:
             return False, reason
@@ -208,9 +235,20 @@ class IntegrationRegistry:
         return True, "ok"
 
     def authorize(
-        self, roles: Iterable[Role], tags: Iterable[str], arguments: Mapping[str, object]
+        self,
+        roles: Iterable[Role],
+        tags: Iterable[str],
+        arguments: Mapping[str, object],
+        *,
+        parameter_names: Iterable[str] | None = None,
     ) -> tuple[bool, str]:
-        """Full call-time check: role, capability and every declared exact target."""
+        """Full call-time check: role, capability, tool schema and exact targets.
+
+        ``parameter_names`` is the tool's complete input schema. An argument that
+        is absent from both ``targets`` and ``inputs`` fails closed, so a tool
+        cannot add an unchecked routing argument after registration.
+        """
+        tags = tuple(tags)
         ok, reason = self.discovery_allowed(roles, tags)
         if not ok:
             return False, reason
@@ -219,6 +257,17 @@ class IntegrationRegistry:
             return False, "integration policy is incomplete"
         if not isinstance(arguments, Mapping):
             return False, "tool arguments are not a mapping"
+        if parameter_names is None:
+            return False, "tool schema is unavailable"
+        try:
+            accepted = set(parameter_names)
+        except TypeError:
+            return False, "tool schema is malformed"
+        if not all(isinstance(name, str) for name in accepted):
+            return False, "tool schema is malformed"
+        declared = set(spec.targets) | set(spec.inputs)
+        if accepted - declared or set(arguments) - accepted:
+            return False, "tool argument is not declared by integration policy"
         for argument, allowed in spec.targets.items():
             value = arguments.get(argument)
             if not isinstance(value, str) or value not in allowed:
@@ -226,6 +275,9 @@ class IntegrationRegistry:
         return True, "ok"
 
     def _resolve(self, tags: Iterable[str]) -> tuple[Integration | None, Capability | None, str]:
+        # Materialize once: tags may be a one-shot iterator and both prefixes
+        # must be resolved against the same values.
+        tags = tuple(tags)
         names = [
             t.removeprefix(INTEGRATION_TAG_PREFIX)
             for t in tags
