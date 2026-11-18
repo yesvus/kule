@@ -54,19 +54,18 @@ _MAX_MESSAGE_TOTAL_BYTES = 64 * 1024
 _MAX_BUDGET_PER_RUN = 1000.0
 _MAX_LIST_PAGES = 5
 _CURSOR_PREFIX = "gc1."
+_CURSOR_NONCE_BYTES = 12
 # FastMCP forwards inbound MCP HTTP headers to the upstream request. Keep only
-# the transport and service-credential headers Canvas needs so a caller cannot
-# smuggle observability tags, cookies or other headers through the gateway.
+# the transport headers Canvas needs so a caller cannot smuggle observability
+# tags, cookies, credentials or other headers through the gateway. The service
+# key is deliberately absent: it is re-applied from configuration after this
+# filter, so an inbound X-Session-API-Key can never replace it.
 _ALLOWED_REQUEST_HEADERS = frozenset(
     {
         "accept",
         "accept-encoding",
-        "connection",
-        "content-length",
         "content-type",
-        "host",
         "user-agent",
-        _API_KEY_HEADER.lower(),
     }
 )
 # Only lifecycle metadata is returned. ConversationInfo also carries the secret
@@ -510,12 +509,20 @@ def _component(route: Any, component: Any) -> None:
 
 
 class _ScopedClient(httpx2.AsyncClient):
-    """Strip caller-supplied headers before Canvas sees the request."""
+    """Strip caller-supplied headers and pin the configured Canvas key."""
+
+    def __init__(self, *args: Any, api_key: str | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._canvas_api_key = api_key
 
     async def send(self, request: httpx2.Request, **kwargs: Any) -> httpx2.Response:
         for name in tuple(request.headers.keys()):
             if name.lower() not in _ALLOWED_REQUEST_HEADERS:
                 del request.headers[name]
+        if self._canvas_api_key is not None:
+            # Re-apply after filtering: FastMCP may add inbound MCP headers to
+            # the built request, including a caller-controlled session key.
+            request.headers[_API_KEY_HEADER] = self._canvas_api_key
         return await super().send(request, **kwargs)
 
 
@@ -523,6 +530,7 @@ def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient
     return _ScopedClient(
         base_url=origin,
         headers={_API_KEY_HEADER: key},
+        api_key=key,
         timeout=max(1.0, min(20.0, timeout_seconds - 1.0)),
         follow_redirects=False,
         trust_env=False,
@@ -604,9 +612,35 @@ def _cursor_key(api_key: str | None) -> bytes:
     return os.urandom(32)
 
 
+def _cursor_stream(key: bytes, nonce: bytes, length: int) -> bytes:
+    """HMAC-SHA256 counter-mode keystream for the opaque page cursor."""
+    stream = bytearray()
+    counter = 0
+    while len(stream) < length:
+        block = hmac.new(
+            key,
+            b"kule-openhands-cursor\x00" + nonce + counter.to_bytes(4, "big"),
+            hashlib.sha256,
+        ).digest()
+        stream.extend(block)
+        counter += 1
+    return bytes(stream[:length])
+
+
 def _encode_cursor(conversation_id: str, key: bytes) -> str:
-    payload = base64.urlsafe_b64encode(conversation_id.encode("ascii")).decode("ascii").rstrip("=")
-    signature = hmac.new(key, payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    """Seal a native page position so excluded conversation IDs stay opaque.
+
+    Canvas continues a scan from a native conversation UUID. The cursor is
+    encrypted and authenticated so a caller cannot read a conversation ID that
+    was filtered out of the page, and any tampering is denied.
+    """
+    nonce = os.urandom(_CURSOR_NONCE_BYTES)
+    raw = uuid.UUID(conversation_id).bytes
+    sealed = bytes(
+        left ^ right for left, right in zip(raw, _cursor_stream(key, nonce, len(raw)), strict=True)
+    )
+    payload = base64.urlsafe_b64encode(nonce + sealed).decode("ascii").rstrip("=")
+    signature = hmac.new(key, b"gc1:" + payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
     return f"{_CURSOR_PREFIX}{signature}.{payload}"
 
 
@@ -623,14 +657,26 @@ def _decode_cursor(value: Any, key: bytes) -> str:
     ):
         raise AuthorizationError("OpenHands pagination is not permitted")
     try:
-        expected = hmac.new(key, payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
-        native = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode("ascii")
-        conversation_id = str(uuid.UUID(native))
-    except (ValueError, UnicodeError):
+        expected = hmac.new(key, b"gc1:" + payload.encode("ascii"), hashlib.sha256).hexdigest()[:32]
+    except UnicodeError:
         raise AuthorizationError("OpenHands pagination is not permitted") from None
     if not hmac.compare_digest(signature, expected):
         raise AuthorizationError("OpenHands pagination is not permitted")
-    return conversation_id
+    try:
+        blob = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4))
+    except (ValueError, UnicodeError):
+        raise AuthorizationError("OpenHands pagination is not permitted") from None
+    if len(blob) != _CURSOR_NONCE_BYTES + 16:
+        raise AuthorizationError("OpenHands pagination is not permitted")
+    nonce, sealed = blob[:_CURSOR_NONCE_BYTES], blob[_CURSOR_NONCE_BYTES:]
+    raw = bytes(
+        left ^ right
+        for left, right in zip(sealed, _cursor_stream(key, nonce, len(sealed)), strict=True)
+    )
+    try:
+        return str(uuid.UUID(bytes=raw))
+    except (ValueError, AttributeError):
+        raise AuthorizationError("OpenHands pagination is not permitted") from None
 
 
 def _safe_conversation(value: Any) -> dict[str, Any]:
@@ -840,8 +886,10 @@ class _TargetGuard(Middleware):
 
         Canvas ``next_page_id`` is the next global conversation UUID, which may
         belong to another repository. Returning it would disclose an excluded
-        conversation ID, so continuation uses the last *returned* session ID
-        behind a signed gateway token instead.
+        conversation ID, so continuation uses an encrypted, authenticated
+        gateway token that encodes a native page position. When no session
+        matched within the page bound, the token anchors on the last scanned
+        position so the scan remains resumable instead of silently ending.
         """
         items: list[dict[str, Any]] = []
         last_scanned: str | None = None
@@ -887,6 +935,11 @@ class _TargetGuard(Middleware):
         cursor = None
         if last_returned is not None and (last_returned != last_scanned or next_native is not None):
             cursor = _encode_cursor(last_returned, self.cursor_key)
+        elif truncated and last_scanned is not None:
+            # The bounded scan saw no match. Resume from the last scanned
+            # position (Canvas treats page_id as an inclusive start) so the
+            # next call does not restart and cannot silently stop.
+            cursor = _encode_cursor(last_scanned, self.cursor_key)
         data = {"items": items, "next_page_id": cursor}
         if truncated:
             data["truncated"] = True

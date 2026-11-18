@@ -753,6 +753,11 @@ async def test_listing_cursor_never_exposes_an_excluded_conversation(gateway):
                     "oh_list_conversations",
                     {"repository": REPOSITORY, "page_id": cursor + "x"},
                 )
+            with pytest.raises(ToolError, match="pagination is not permitted"):
+                await caller.call_tool(
+                    "oh_list_conversations",
+                    {"repository": REPOSITORY, "page_id": "gc1." + "0" * 32 + ".\u00e9"},
+                )
 
     assert len(requests) == 2
     assert all("gc1." not in str(request.url) for request in requests)
@@ -785,6 +790,84 @@ async def test_stale_listing_cursor_fails_closed(gateway):
                     "oh_list_conversations",
                     {"repository": REPOSITORY, "page_id": first.data["next_page_id"]},
                 )
+
+
+def test_launch_checkout_is_bound_to_the_approved_repository_mapping():
+    approved = {
+        REPOSITORY: "/workspace/src/kule",
+        OTHER_REPOSITORY: "/workspace/src/other",
+    }
+    guard = openhands._TargetGuard(None, approved, b"cursor-key")  # type: ignore[arg-type]
+    base = {
+        "repository": REPOSITORY,
+        "agent_profile_id": PROFILE,
+        "tags": {"kuleissue": "yesvus/kule#27"},
+    }
+    guard._start({**base, "workspace": {"working_dir": "/workspace/src/kule"}})
+    for path in ("/workspace/src/other", "/workspace/src/kule-evil", "/workspace/src"):
+        with pytest.raises(AuthorizationError, match="approved repository path"):
+            guard._start({**base, "workspace": {"working_dir": path}})
+
+
+async def test_truncated_listing_returns_a_resumable_opaque_cursor(gateway):
+    mcp, _, _ = gateway
+    excluded = [f"aaaaaaaa-aaaa-aaaa-aaaa-{index:012d}" for index in range(1, 7)]
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        page = request.url.params.get("page_id")
+        if page is None:
+            return httpx2.Response(
+                200,
+                json={
+                    "items": [{"id": excluded[0]}],
+                    "next_page_id": excluded[1],
+                },
+            )
+        if page in excluded:
+            index = excluded.index(page)
+            if index < len(excluded) - 1:
+                return httpx2.Response(
+                    200,
+                    json={
+                        "items": [{"id": page}],
+                        "next_page_id": excluded[index + 1],
+                    },
+                )
+            return httpx2.Response(
+                200,
+                json={
+                    "items": [
+                        {"id": page},
+                        {"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}},
+                    ],
+                    "next_page_id": None,
+                },
+            )
+        raise AssertionError(f"unexpected page_id {page}")
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            first = await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
+            assert first.data["items"] == []
+            assert first.data["truncated"] is True
+            cursor = first.data["next_page_id"]
+            assert cursor is not None and cursor.startswith("gc1.")
+            for conversation_id in excluded:
+                assert conversation_id not in cursor
+            second = await caller.call_tool(
+                "oh_list_conversations",
+                {"repository": REPOSITORY, "page_id": cursor},
+            )
+            assert [item["id"] for item in second.data["items"]] == [CONVERSATION]
+            assert second.data["next_page_id"] is None
+            assert "truncated" not in second.data
+
+    assert len(requests) == 7
 
 
 async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway):
@@ -833,7 +916,7 @@ async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway)
     assert "repository" not in search.url.params
 
 
-async def test_outbound_transport_strips_unapproved_headers():
+async def test_outbound_transport_strips_unapproved_headers_and_pins_the_configured_key():
     seen: dict[str, str] = {}
 
     def handler(request: httpx2.Request) -> httpx2.Response:
@@ -847,12 +930,14 @@ async def test_outbound_transport_strips_unapproved_headers():
     client = openhands._ScopedClient(
         base_url=ORIGIN,
         headers={"X-Session-API-Key": "dedicated-service-key"},
+        api_key="dedicated-service-key",
         transport=httpx2.MockTransport(handler),
     )
     try:
         await client.get(
             "/api/conversations/search",
             headers={
+                "X-Session-API-Key": "caller-controlled-key",
                 "X-OpenHands-Observability-Tags": "repo=other",
                 "Authorization": "Bearer operator",
                 "Cookie": "session=operator",
@@ -861,9 +946,39 @@ async def test_outbound_transport_strips_unapproved_headers():
     finally:
         await client.aclose()
 
+    # An inbound session key is filtered out and replaced with the configured key.
     assert seen["x-session-api-key"] == "dedicated-service-key"
     for name in ("x-openhands-observability-tags", "authorization", "cookie"):
         assert name not in seen
+
+
+async def test_inbound_mcp_headers_cannot_override_the_canvas_key(gateway, monkeypatch):
+    mcp, _, _ = gateway
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.update(dict(request.headers))
+        return httpx2.Response(200, json={"items": [], "next_page_id": None})
+
+    client = openhands._ScopedClient(
+        base_url=ORIGIN,
+        api_key="dedicated-service-key",
+        transport=httpx2.MockTransport(handler),
+    )
+    # Simulate FastMCP copying inbound MCP HTTP headers onto the built request.
+    monkeypatch.setattr(
+        "fastmcp.server.providers.openapi.components.get_http_headers",
+        lambda: {
+            "X-Session-API-Key": "caller-controlled-key",
+            "X-OpenHands-Observability-Tags": "repo=other",
+        },
+    )
+    openhands.mount(mcp, client=client)
+    async with Client(mcp) as caller:
+        await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
+
+    assert seen["x-session-api-key"] == "dedicated-service-key"
+    assert "x-openhands-observability-tags" not in seen
 
 
 async def test_lifespan_factory_is_callable_and_closes_the_owned_client():
