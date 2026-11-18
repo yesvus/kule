@@ -12,6 +12,7 @@ from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from .audit import AuditLog
 from .authz import Policy
 from .config import Config
+from .integrations import IntegrationRegistry
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
 from .tools import basic, host_exec, kubernetes, upstream_argocd, upstream_kubernetes, workspace
 
@@ -62,6 +63,7 @@ def build_server(
     *,
     auth: AuthProvider | None = None,
     claims_getter: ClaimsGetter = claims_from_request,
+    integrations: IntegrationRegistry | None = None,
 ) -> FastMCP:
     policy = Policy(
         required_group=cfg.auth.required_group,
@@ -72,6 +74,10 @@ def build_server(
         workspace_enabled=cfg.tools.workspace_enabled,
         developer_group=cfg.auth.developer_group,
         developer_enabled=cfg.tools.developer_enabled,
+        developer_isolation_verified=cfg.tools.developer_isolation_verified,
+        breakglass_group=cfg.auth.breakglass_group,
+        breakglass_enabled=cfg.tools.breakglass_enabled,
+        breakglass_max_ttl_seconds=cfg.tools.breakglass_max_ttl_seconds,
     )
     audit = AuditLog(cfg.audit.path)
     middleware = OperatorMiddleware(
@@ -81,6 +87,7 @@ def build_server(
         timeout_seconds=cfg.tools.timeout_seconds,
         max_output_bytes=cfg.tools.max_output_bytes,
         claims_getter=claims_getter,
+        integrations=integrations if integrations is not None else IntegrationRegistry(),
     )
     mcp = FastMCP(
         name="operator-mcp",

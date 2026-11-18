@@ -1,21 +1,34 @@
-"""Deny-by-default, group-based authorization for tool tiers.
+"""Deny-by-default, group-based authorization for tool tiers and roles.
 
-Each tool carries exactly one tier tag. A caller may use a tier only if the
-token's groups claim contains the required group. The ``exec`` tier also
-requires its own group and enablement flag. The separate ``workspace`` tier
-requires the workspace group and explicit enablement. A separately gated
-non-operator developer can be admitted to *only* the workspace tier after
-credential isolation. Untagged tools are never callable.
+Each legacy tool carries exactly one tier tag. A caller may use a tier only if the
+token's groups claim contains the required group. The ``exec`` tier also requires
+its own group and enablement flag. The separate ``workspace`` tier requires the
+workspace group and explicit enablement. A separately gated non-operator developer
+can be admitted to *only* the workspace tier. Untagged tools are never callable.
+
+The canonical Developer/Operator/Break-glass roles are derived from authenticated
+identity claims, never from a model name or client-supplied profile. Role-aware
+integrations are additionally constrained by capability and target in
+``integrations.py``; the legacy tiers above remain unchanged for existing tools.
 """
 
 from __future__ import annotations
 
+import math
+import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any
 
 READ, OPERATE, EXEC, WORKSPACE = "read", "operate", "exec", "workspace"
 TIERS = (READ, OPERATE, EXEC, WORKSPACE)
+
+
+class Role(StrEnum):
+    DEVELOPER = "developer"
+    OPERATOR = "operator"
+    BREAK_GLASS = "breakglass"
 
 
 @dataclass(frozen=True)
@@ -23,6 +36,9 @@ class Caller:
     subject: str
     username: str
     groups: frozenset[str]
+    # Unix seconds from a separately granted break-glass claim. The raw claim is
+    # never trusted beyond this bounded timestamp.
+    breakglass_expires_at: float | None = None
 
 
 def normalize_groups(raw: Any) -> frozenset[str]:
@@ -44,6 +60,13 @@ class Policy:
     workspace_enabled: bool = False
     developer_group: str = "mcp-developers"
     developer_enabled: bool = False
+    # Separate hard gate for the general Developer role. Keep false until the
+    # shared Tezgah UID/HOME credential isolation in ops#731 is verified.
+    developer_isolation_verified: bool = False
+    breakglass_group: str = "mcp-breakglass"
+    breakglass_enabled: bool = False
+    breakglass_max_ttl_seconds: int = 900
+    breakglass_expires_claim: str = "breakglass_exp"
 
     def __post_init__(self) -> None:
         for name in (
@@ -51,22 +74,37 @@ class Policy:
             "exec_group",
             "workspace_group",
             "developer_group",
+            "breakglass_group",
             "groups_claim",
+            "breakglass_expires_claim",
         ):
             value = getattr(self, name)
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{name} must be a non-empty string")
-        if not isinstance(self.exec_enabled, bool):
-            raise ValueError("exec_enabled must be a bool")
+        groups = {
+            self.required_group,
+            self.exec_group,
+            self.workspace_group,
+            self.developer_group,
+            self.breakglass_group,
+        }
+        if len(groups) != 5:
+            raise ValueError(
+                "required, exec, workspace, developer and breakglass groups must differ"
+            )
+        for name in ("exec_enabled", "workspace_enabled", "developer_enabled"):
+            if not isinstance(getattr(self, name), bool):
+                raise ValueError(f"{name} must be a bool")
+        if not isinstance(self.developer_isolation_verified, bool):
+            raise ValueError("developer_isolation_verified must be a bool")
+        if not isinstance(self.breakglass_enabled, bool):
+            raise ValueError("breakglass_enabled must be a bool")
         if (
-            len({self.required_group, self.exec_group, self.workspace_group, self.developer_group})
-            != 4
+            isinstance(self.breakglass_max_ttl_seconds, bool)
+            or not isinstance(self.breakglass_max_ttl_seconds, int)
+            or not 60 <= self.breakglass_max_ttl_seconds <= 3600
         ):
-            raise ValueError("required, exec and workspace groups must differ")
-        if not isinstance(self.workspace_enabled, bool):
-            raise ValueError("workspace_enabled must be a bool")
-        if not isinstance(self.developer_enabled, bool):
-            raise ValueError("developer_enabled must be a bool")
+            raise ValueError("breakglass_max_ttl_seconds must be an integer from 60 to 3600")
 
     def caller_from_claims(self, claims: Mapping[str, Any] | None) -> Caller | None:
         if not claims:
@@ -76,7 +114,37 @@ class Policy:
             return None
         groups = normalize_groups(claims.get(self.groups_claim))
         username = claims.get("preferred_username") or claims.get("email") or sub
-        return Caller(subject=sub, username=str(username), groups=groups)
+        expiry = _timestamp(claims.get(self.breakglass_expires_claim))
+        return Caller(
+            subject=sub,
+            username=str(username),
+            groups=groups,
+            breakglass_expires_at=expiry,
+        )
+
+    def roles(self, caller: Caller | None, now: float | None = None) -> frozenset[Role]:
+        """Derive roles from authenticated claims; unknown claims grant nothing.
+
+        A break-glass group is inert unless the feature is enabled, a separate
+        expiry claim is present and it lies within the configured maximum TTL.
+        """
+        if caller is None:
+            return frozenset()
+        found: set[Role] = set()
+        if self.required_group in caller.groups:
+            found.add(Role.OPERATOR)
+        if (
+            self.developer_group in caller.groups
+            and self.developer_enabled
+            and self.developer_isolation_verified
+        ):
+            found.add(Role.DEVELOPER)
+        expiry = caller.breakglass_expires_at
+        if self.breakglass_group in caller.groups and self.breakglass_enabled and expiry:
+            current = time.time() if now is None else now
+            if current < expiry <= current + self.breakglass_max_ttl_seconds:
+                found.add(Role.BREAK_GLASS)
+        return frozenset(found)
 
     def tier_of(self, tags: Iterable[str]) -> str | None:
         found = [t for t in tags if t in TIERS]
@@ -110,3 +178,11 @@ class Policy:
             if self.exec_group not in caller.groups:
                 return False, f"caller is not in {self.exec_group}"
         return True, "ok"
+
+
+def _timestamp(raw: Any) -> float | None:
+    """Accept only a finite non-boolean number; malformed claims grant nothing."""
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    value = float(raw)
+    return value if math.isfinite(value) and value > 0 else None

@@ -76,6 +76,7 @@ class AuthConfig:
     jwt_signing_key: str = field(default="", repr=False)
     workspace_group: str = "mcp-workspace"
     developer_group: str = "mcp-developers"
+    breakglass_group: str = "mcp-breakglass"
 
 
 @dataclass(frozen=True)
@@ -91,6 +92,11 @@ class ToolsConfig:
     max_output_bytes: int = 64 * 1024
     workspace_enabled: bool = False
     developer_enabled: bool = False
+    # General Developer/PR-worker activation stays off until ops#731 proves the
+    # shared Tezgah UID/HOME no longer exposes operator credentials.
+    developer_isolation_verified: bool = False
+    breakglass_enabled: bool = False
+    breakglass_max_ttl_seconds: int = 900
 
 
 @dataclass(frozen=True)
@@ -174,6 +180,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         exec_group=_str(a.get("exec_group", "mcp-exec"), "auth.exec_group"),
         workspace_group=_str(a.get("workspace_group", "mcp-workspace"), "auth.workspace_group"),
         developer_group=_str(a.get("developer_group", "mcp-developers"), "auth.developer_group"),
+        breakglass_group=_str(a.get("breakglass_group", "mcp-breakglass"), "auth.breakglass_group"),
         groups_claim=_str(a.get("groups_claim", "groups"), "auth.groups_claim"),
         allowed_client_redirect_uris=_string_list(
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
@@ -189,6 +196,13 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
         workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
         developer_enabled=_bool(t.get("developer_enabled", False), "tools.developer_enabled"),
+        developer_isolation_verified=_bool(
+            t.get("developer_isolation_verified", False), "tools.developer_isolation_verified"
+        ),
+        breakglass_enabled=_bool(t.get("breakglass_enabled", False), "tools.breakglass_enabled"),
+        breakglass_max_ttl_seconds=_int(
+            t.get("breakglass_max_ttl_seconds", 900), "tools.breakglass_max_ttl_seconds"
+        ),
         scratch_dir=_path(
             t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
         ),
@@ -215,6 +229,10 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
 def validate(cfg: Config) -> None:
     if cfg.tools.developer_enabled and not cfg.tools.workspace_enabled:
         raise ConfigError("developer_enabled requires workspace_enabled")
+    if cfg.tools.developer_isolation_verified and not cfg.tools.developer_enabled:
+        raise ConfigError("developer_isolation_verified requires developer_enabled")
+    if not 60 <= cfg.tools.breakglass_max_ttl_seconds <= 3600:
+        raise ConfigError("tools.breakglass_max_ttl_seconds must be between 60 and 3600")
     if not 1 <= cfg.server.port <= 65535:
         raise ConfigError("server.port must be between 1 and 65535")
     if cfg.server.host not in ("127.0.0.1", "::1", "localhost"):
@@ -238,10 +256,11 @@ def validate(cfg: Config) -> None:
         cfg.auth.exec_group,
         cfg.auth.workspace_group,
         cfg.auth.developer_group,
+        cfg.auth.breakglass_group,
     )
     if any(not group for group in groups):
         raise ConfigError("auth role groups must not be empty")
-    if len(set(groups)) != 4:
+    if len(set(groups)) != 5:
         raise ConfigError("auth role groups must differ")
     if not cfg.auth.allowed_client_redirect_uris:
         raise ConfigError("auth.allowed_client_redirect_uris must not be empty")

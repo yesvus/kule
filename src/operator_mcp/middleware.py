@@ -19,7 +19,8 @@ from fastmcp.server.middleware.middleware import CallNext, Middleware, Middlewar
 from fastmcp.tools.base import Tool, ToolResult
 
 from .audit import AuditLog
-from .authz import Caller, Policy
+from .authz import Caller, Policy, Role
+from .integrations import IntegrationRegistry, is_integration_tool
 
 ClaimsGetter = Callable[[], Mapping[str, Any] | None]
 
@@ -38,6 +39,7 @@ class OperatorMiddleware(Middleware):
         timeout_seconds: float,
         max_output_bytes: int = 64 * 1024,
         claims_getter: ClaimsGetter = claims_from_request,
+        integrations: IntegrationRegistry | None = None,
     ) -> None:
         self.policy = policy
         self.audit = audit
@@ -45,6 +47,7 @@ class OperatorMiddleware(Middleware):
         self.timeout_seconds = timeout_seconds
         self.max_output_bytes = max_output_bytes
         self.claims_getter = claims_getter
+        self.integrations = integrations
 
     async def _audit(self, event: str, **fields: Any) -> None:
         # flock + fsync block; keep them off the event loop.
@@ -59,6 +62,9 @@ class OperatorMiddleware(Middleware):
     def _caller(self) -> Caller | None:
         return self.policy.caller_from_claims(self.claims_getter())
 
+    def _roles(self, caller: Caller | None) -> frozenset[Role]:
+        return self.policy.roles(caller)
+
     async def on_list_tools(
         self,
         context: MiddlewareContext[mt.ListToolsRequest],
@@ -66,7 +72,18 @@ class OperatorMiddleware(Middleware):
     ) -> Sequence[Tool]:
         tools = await call_next(context)
         caller = self._caller()
-        return [t for t in tools if self.policy.allows(caller, t.tags)[0]]
+        roles = self._roles(caller)
+        visible: list[Tool] = []
+        for tool in tools:
+            if is_integration_tool(tool.tags):
+                if (
+                    self.integrations is not None
+                    and self.integrations.discovery_allowed(roles, tool.tags)[0]
+                ):
+                    visible.append(tool)
+            elif self.policy.allows(caller, tool.tags)[0]:
+                visible.append(tool)
+        return visible
 
     async def on_call_tool(
         self,
@@ -78,11 +95,13 @@ class OperatorMiddleware(Middleware):
         args = dict(context.message.arguments or {})
         audit_args = _audit_arguments(name, args)
         caller = self._caller()
+        roles = self._roles(caller)
         who = {
             "call_id": call_id,
             "tool": name,
             "user": caller.username if caller else None,
             "sub": caller.subject if caller else None,
+            "roles": sorted(role.value for role in roles),
         }
 
         if self.kill_switch.exists():
@@ -96,7 +115,17 @@ class OperatorMiddleware(Middleware):
             await self._audit("denied", reason="unknown tool", args=audit_args, **who)
             raise AuthorizationError(f"tool '{name}' is not available")
 
-        ok, reason = self.policy.allows(caller, tool.tags)
+        if is_integration_tool(tool.tags):
+            # Role/capability/target policy is authoritative for integration
+            # tools; legacy tier tags must not widen or bypass it.
+            if self.integrations is None:
+                ok, reason = False, "integration registry unavailable"
+            else:
+                ok, reason = self.integrations.authorize(roles, tool.tags, args)
+            tier = "integration"
+        else:
+            ok, reason = self.policy.allows(caller, tool.tags)
+            tier = self.policy.tier_of(tool.tags)
         if not ok:
             await self._audit("denied", reason=reason, args=audit_args, **who)
             # Keep the policy detail in the audit record, not in the response.
@@ -119,7 +148,6 @@ class OperatorMiddleware(Middleware):
                 )
                 raise AuthorizationError("Argo CD endpoint override is not permitted") from None
 
-        tier = self.policy.tier_of(tool.tags)
         await self._audit("call", tier=tier, args=audit_args, **who)
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already

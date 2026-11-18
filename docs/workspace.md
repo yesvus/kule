@@ -111,6 +111,8 @@ Effective policy (both tool discovery and call-time authorization):
 
 This is a **source capability only**, not a provisioned machine OAuth client, Authentik group, JWT issuer, independent namespace ServiceAccount, or a secure worker sandbox. Full enablement is blocked by #731 (legacy broad GitHub PAT/personal SSH key in migrated shared HOME), and by review of Kule's exact-Pod Tezgah `pods/exec` identity, negative Kubernetes rights, and actual authenticated non-operator agent token behavior. Separate worker identities must be verified end to end; never assign cheap agents `mcp-gurbet-operators` as a workaround.
 
+The three-role Developer/Operator/Break-glass policy, exact-target registry and the separate `developer_isolation_verified` hard gate for general developer/PR-worker activation are documented in [ws-oh-auth.md](ws-oh-auth.md). That gate is also source-only and remains false until the credential isolation above is accepted.
+
 **Limit:** All Tezgah agents sharing UID 10001/HOME remain in the *same trust domain*. `workspace_exec` can read all files available to that UID. Git worktrees are concurrency organization, not permission isolation. For a stricter reader-only agent, use a separate backend/credential boundary rather than giving it a shell or relabeling unrestricted Kubernetes reads as observer-safe.
 
 The feature flags **remain false** in `yesvus/ops` until the credential isolation and independent identity gates are accepted. This code change must not modify the live Kule OAuth DCR state or require SentinelX retirement.
