@@ -227,6 +227,9 @@ class OperatorMiddleware(Middleware):
                 )
                 raise AuthorizationError("Argo CD endpoint override is not permitted") from None
 
+        # Record the authorized attempt before dispatch so a crash or
+        # cancellation remains auditable. If the post-wait check below rejects,
+        # the following denied record states that call_next never ran.
         await self._audit("call", tier=tier, args=audit_args, **who)
 
         # The audit write yields. Recheck the same policy immediately before

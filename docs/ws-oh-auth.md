@@ -68,8 +68,10 @@ Deny conditions at call time:
 - wildcard/prefix target values, which are rejected when the integration is
   registered.
 
-Discovery checks role and capability only; missing or out-of-list targets are
-call-time denials, and wildcard declarations are registration errors.
+Discovery validates the integration tag, capability tag, enabled state and
+role. Missing or out-of-list targets and undeclared schema arguments are
+call-time denials; malformed tags, unknown/disabled integrations and wildcard
+declarations fail closed.
 
 Targets are resource arguments such as `repository`, `namespace`,
 `acp_profile`, `host` or `profile`. Full endpoint allowlisting, Kubernetes RBAC,
