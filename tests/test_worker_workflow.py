@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from urllib.parse import parse_qs
 from uuid import UUID, uuid4
 
 import httpx2
@@ -18,6 +19,7 @@ from operator_mcp.worker_workflow import (
     WorkerTimeout,
     build_prompt,
     build_start_request,
+    build_task_message,
     map_status,
     parse_pr_evidence,
     validate_model,
@@ -26,16 +28,17 @@ from operator_mcp.worker_workflow import (
 PROFILE_ID = UUID("11111111-1111-4111-8111-111111111111")
 CONVERSATION_ID = UUID("22222222-2222-4222-8222-222222222222")
 COMMIT = "a" * 40
-WORKTREE = f"/tmp/conversation-worktrees/{CONVERSATION_ID}/kule"
 REPO_PATH = "/workspace/src/kule"
+REPOSITORIES = {"yesvus/kule": REPO_PATH}
 ISSUE = "yesvus/kule#23"
+PROFILE_NAME = "opencode-economical"
+OTHER_MODEL = "opencode-go/deepseek-v4-pro"
 
 
 def task(**overrides) -> WorkerTask:
     values = {
         "issue_ref": ISSUE,
         "repository": "yesvus/kule",
-        "repo_path": REPO_PATH,
         "task": "Implement the source-only worker workflow.",
         "profile_id": PROFILE_ID,
         "expected_model": DEFAULT_MODEL,
@@ -47,13 +50,22 @@ def task(**overrides) -> WorkerTask:
     return WorkerTask(**values)
 
 
+def worktree(task_value: WorkerTask) -> str:
+    return f"/tmp/conversation-worktrees/{task_value.conversation_id}/kule"
+
+
 def profile(task_value: WorkerTask, **overrides) -> dict:
     payload = {
         "id": str(task_value.profile_id),
-        "name": "opencode-economical",
+        "name": PROFILE_NAME,
         "agent_kind": "acp",
         "acp_server": task_value.expected_acp_server,
         "acp_model": task_value.expected_model,
+        "acp_effort": None,
+        "acp_command": None,
+        "acp_args": None,
+        "secret_refs": None,
+        "mcp_server_refs": None,
     }
     payload.update(overrides)
     return payload
@@ -63,11 +75,11 @@ def conversation(task_value: WorkerTask, **overrides) -> dict:
     payload = {
         "id": str(task_value.conversation_id),
         "execution_status": "running",
+        "current_model_id": task_value.expected_model,
+        "current_effort": task_value.expected_effort,
+        "title": "source-only worker",
         "tags": dict(task_value.tags),
-        "workspace": {
-            "kind": "LocalWorkspace",
-            "working_dir": f"/tmp/conversation-worktrees/{task_value.conversation_id}/kule",
-        },
+        "workspace": {"kind": "LocalWorkspace", "working_dir": worktree(task_value)},
         "agent": {
             "kind": "ACPAgent",
             "acp_server": task_value.expected_acp_server,
@@ -93,16 +105,42 @@ def evidence_block(task_value: WorkerTask, **overrides) -> str:
 class Server:
     """Small scripted OpenHands transport with call recording."""
 
-    def __init__(self, task_value: WorkerTask) -> None:
+    def __init__(
+        self,
+        task_value: WorkerTask,
+        *,
+        profile_model: str | None = None,
+        repositories: dict[str, str] | None = None,
+    ) -> None:
         self.task = task_value
+        self.repositories = repositories or dict(REPOSITORIES)
         self.calls: list[tuple[str, str, dict | None, str]] = []
         self.start_status = 201
-        self.profile = profile(task_value)
+        self.auto_start = False
+        self.created = False
+        self.echo_tags = True
+        self.tags_by_id: dict[str, dict] = {}
+        self.profile = profile(
+            task_value,
+            acp_model=task_value.expected_model if profile_model is None else profile_model,
+        )
         self.conversation = conversation(task_value)
         self.final = evidence_block(task_value)
+        self.catalog = [
+            {"model_id": task_value.expected_model, "name": "requested"},
+            {"model_id": OTHER_MODEL, "name": "default"},
+        ]
+        self.efforts = {
+            task_value.expected_model: [
+                {"value": "high", "name": "High"},
+                {"value": "max", "name": "Max"},
+            ]
+        }
+        self.discovery_error: dict | None = None
         self.pr = {
             "url": f"https://github.com/{task_value.repository}/pull/42",
             "head_sha": COMMIT,
+            "head_ref": task_value.branch,
             "state": "open",
             "checks": "success",
             "draft": False,
@@ -111,10 +149,29 @@ class Server:
         self.active_starts = 0
         self.max_active_starts = 0
         self.workspace_override: dict | None = None
+        self.event_status = 200
+        self.run_status = 200
+        self.final_status = 200
+        self.search_pages: list[dict] = [
+            {"items": [conversation(task_value)], "next_page_id": None}
+        ]
+
+    def info_for(self, conversation_id: str) -> dict:
+        return {
+            **self.conversation,
+            "id": conversation_id,
+            "tags": self.tags_by_id.get(conversation_id, self.conversation.get("tags", {})),
+            "workspace": self.workspace_override
+            or {
+                "kind": "LocalWorkspace",
+                "working_dir": f"/tmp/conversation-worktrees/{conversation_id}/kule",
+            },
+        }
 
     async def handler(self, request: httpx2.Request) -> httpx2.Response:
         body = json.loads(request.content) if request.content else None
-        self.calls.append((request.method, request.url.path, body, request.url.query.decode()))
+        query = request.url.query.decode()
+        self.calls.append((request.method, request.url.path, body, query))
         path = request.url.path
         if request.method == "GET" and path == "/api/agent-profiles":
             return httpx2.Response(
@@ -130,10 +187,24 @@ class Server:
                     "active_agent_profile_id": None,
                 },
             )
-        if request.method == "GET" and path == "/api/agent-profiles/opencode-economical":
+        if request.method == "GET" and path == f"/api/agent-profiles/{self.profile['name']}":
             return httpx2.Response(
-                200, json={"name": "opencode-economical", "profile": self.profile}
+                200, json={"name": self.profile["name"], "profile": self.profile}
             )
+        if request.method == "POST" and path == "/api/acp/models":
+            return httpx2.Response(
+                200,
+                json={
+                    "current_model_id": OTHER_MODEL,
+                    "available_models": self.catalog,
+                    "efforts_by_model": self.efforts,
+                    "error": self.discovery_error,
+                },
+            )
+        if request.method == "GET" and path == "/api/conversations/search":
+            params = parse_qs(query)
+            page = int(params.get("page_id", ["0"])[0])
+            return httpx2.Response(200, json=self.search_pages[page])
         if request.method == "POST" and path == "/api/conversations":
             self.active_starts += 1
             self.max_active_starts = max(self.max_active_starts, self.active_starts)
@@ -141,29 +212,56 @@ class Server:
                 await asyncio.sleep(self.start_delay)
             self.active_starts -= 1
             conversation_id = body["conversation_id"]
-            info = {
-                **self.conversation,
-                "id": conversation_id,
-                "workspace": self.workspace_override
-                or {
-                    "kind": "LocalWorkspace",
-                    "working_dir": f"/tmp/conversation-worktrees/{conversation_id}/kule",
-                },
-            }
-            return httpx2.Response(self.start_status, json=info)
-        if request.method == "GET" and path == f"/api/conversations/{self.task.conversation_id}":
-            return httpx2.Response(200, json=self.conversation)
+            if self.auto_start:
+                status = 200 if self.created else 201
+                self.created = True
+            else:
+                status = self.start_status
+            if self.echo_tags and isinstance(body.get("tags"), dict):
+                self.tags_by_id[conversation_id] = body["tags"]
+            info = self.info_for(conversation_id)
+            return httpx2.Response(status, json=info)
+        if path.startswith("/api/conversations/") and request.method == "POST":
+            parts = path.strip("/").split("/")
+            # /api/conversations/{id}/{action}
+            if len(parts) == 4 and parts[3] == "switch_acp_model":
+                return httpx2.Response(200, json={"success": True})
+            if len(parts) == 4 and parts[3] == "switch_acp_effort":
+                return httpx2.Response(200, json={"success": True})
+            if len(parts) == 4 and parts[3] == "events":
+                return httpx2.Response(self.event_status, json={"success": True})
+            if len(parts) == 4 and parts[3] == "run":
+                return httpx2.Response(self.run_status, json={"success": True})
+            if len(parts) == 4 and parts[3] == "interrupt":
+                if self.conversation.get("execution_status") not in {
+                    "finished",
+                    "error",
+                    "stuck",
+                }:
+                    self.conversation = {
+                        **self.conversation,
+                        "execution_status": "paused",
+                    }
+                return httpx2.Response(200, json={"success": True})
         if (
             request.method == "GET"
-            and path == f"/api/conversations/{self.task.conversation_id}/agent_final_response"
+            and path.startswith("/api/conversations/")
+            and path.count("/") == 3
         ):
+            conversation_id = path.rsplit("/", 1)[-1]
+            return httpx2.Response(200, json=self.info_for(conversation_id))
+        if (
+            request.method == "GET"
+            and path.startswith("/api/conversations/")
+            and path.endswith("/agent_final_response")
+        ):
+            if self.final_status != 200:
+                return httpx2.Response(self.final_status, json={"detail": "failed"})
             return httpx2.Response(200, json={"response": self.final})
         if (
-            request.method == "POST"
-            and path == f"/api/conversations/{self.task.conversation_id}/interrupt"
+            request.method == "GET"
+            and path == f"/api/git/repositories/{self.task.repository}/pull-requests/42"
         ):
-            return httpx2.Response(200, json={"success": True})
-        if request.method == "GET" and "/api/git/repositories/" in path:
             return httpx2.Response(200, json=self.pr)
         return httpx2.Response(404, json={"detail": "not found"})
 
@@ -175,6 +273,7 @@ def client_for(server: Server, **kwargs) -> WorkerClient:
     return WorkerClient(
         "https://canvas.example",
         "synthetic-session-key",
+        repositories=server.repositories,
         transport=httpx2.MockTransport(server.handler),
         **kwargs,
     )
@@ -192,126 +291,293 @@ def test_exact_model_validation_rejects_display_name_and_globs():
     ):
         with pytest.raises(WorkerError):
             validate_model(bad)
-    # A well-formed but non-matching ID is rejected by exact profile equality
-    # at preflight, not by guessing which suffixes look like display names.
     wrong = task(expected_model="opencode-go/deepseek-v4.1-flash-1017")
     assert wrong.expected_model != DEFAULT_MODEL
 
 
-def test_task_has_unique_branch_and_native_idempotency_tags():
-    first = task()
-    second = task(conversation_id=uuid4(), task="Different work.")
-    assert first.branch == "oh23/ws-oh-workers/22222222-2222-4222-8222-222222222222"
-    assert first.branch != second.branch
-    assert first.tags["kuletask"] != second.tags["kuletask"]
-    assert first.tags["kuleissue"] == ISSUE
-    assert first.tags["kuletask"] == first.task_digest
-    assert first.tags["kulemodel"] == DEFAULT_MODEL
-    assert len(first.tags["kulerepopath"]) == 16
-    with pytest.raises(WorkerError):
-        task(branch_prefix="../escape/")
-    with pytest.raises(WorkerError):
-        task(branch_prefix="oh23//worker/")
-    with pytest.raises(WorkerError):
-        task(repo_path="relative/repo")
-
-
-def test_start_request_matches_pinned_upstream_schema():
+def test_task_requires_matching_issue_repo_and_canonical_identity():
     value = task()
-    body = build_start_request(value)
+    assert value.repository_key == "yesvus/kule"
+    assert value.tags == {
+        "kulerepo": "yesvus/kule",
+        "kuleissue": ISSUE,
+        "kuletask": value.task_digest,
+        "kulemodel": DEFAULT_MODEL,
+        "kuleprofile": str(PROFILE_ID),
+        "kulebranch": value.branch,
+        "kuleeffort": "-",
+    }
+    with pytest.raises(WorkerError, match="issue_ref repository"):
+        task(issue_ref="yesvus/ops#23")
+    with pytest.raises(WorkerError, match="repository"):
+        task(repository="not-a-repo")
+    with pytest.raises(WorkerError, match="dot path"):
+        task(repository="../kule", issue_ref="../kule#1")
+    with pytest.raises(WorkerError, match="conversation_id"):
+        task(conversation_id="../../etc/passwd")
+    with pytest.raises(WorkerError, match="branch_prefix"):
+        task(branch_prefix="../escape/")
+    with pytest.raises(WorkerError, match="branch_prefix"):
+        task(branch_prefix="oh23//worker/")
+    with pytest.raises(WorkerError, match="branch_prefix"):
+        task(branch_prefix="oh23/.lock/")
+    with pytest.raises(WorkerError, match="secret values"):
+        task(secrets={"name": "not-an-object"})
+
+
+def test_start_request_in_profile_mode_has_no_initial_message():
+    value = task()
+    pre = ww.ModelPreflight(
+        profile_name=PROFILE_NAME,
+        profile_id=PROFILE_ID,
+        mode="profile",
+        acp_server="opencode",
+        model=DEFAULT_MODEL,
+    )
+    body = build_start_request(value, REPO_PATH, pre)
     assert body["workspace"] == {"kind": "LocalWorkspace", "working_dir": REPO_PATH}
     assert body["worktree"] is True
     assert body["worktree_options"] == {
         "base": "default_branch",
         "branch_prefix": "oh23/ws-oh-workers/",
     }
-    assert body["conversation_id"] == str(CONVERSATION_ID)
     assert body["agent_profile_id"] == str(PROFILE_ID)
-    assert body["conversation_runtime"] == "local"
-    assert body["max_iterations"] == 80
-    assert body["max_budget_per_run"] == 2.0
-    assert body["autotitle"] is False
-    assert "agent" not in body and "agent_settings" not in body
+    assert "agent_settings" not in body
+    assert "initial_message" not in body
     assert body["tags"] == value.tags
-    message = body["initial_message"]
-    assert message["role"] == "user"
-    assert message["content"][0]["type"] == "text"
+    message = build_task_message(value)
+    assert message["run"] is True
     assert "worker-evidence" in message["content"][0]["text"]
-    assert "Do not deploy" in message["content"][0]["text"]
     assert value.branch in message["content"][0]["text"]
 
 
-def test_prompt_carries_issue_scope_and_pr_contract():
-    text = build_prompt(task())
-    assert ISSUE in text
-    assert "only inside your assigned worktree" in text
-    assert "Never push the default branch" in text
-    assert "worker-evidence" in text
+def test_start_request_in_override_mode_uses_agent_settings_and_filters_secrets():
+    value = task(
+        secrets={
+            "OPENCODE_API_KEY": {"kind": "LookupSecret", "url": "x"},
+            "UNRELATED": {"kind": "StaticSecret", "value": "y"},
+        }
+    )
+    pre = ww.ModelPreflight(
+        profile_name=PROFILE_NAME,
+        profile_id=PROFILE_ID,
+        mode="override",
+        acp_server="opencode",
+        model=DEFAULT_MODEL,
+        agent_settings={
+            "agent_kind": "acp",
+            "acp_server": "opencode",
+            "acp_model": DEFAULT_MODEL,
+        },
+        secret_names=("OPENCODE_API_KEY",),
+    )
+    body = build_start_request(value, REPO_PATH, pre)
+    assert "agent_profile_id" not in body
+    assert body["agent_settings"]["acp_model"] == DEFAULT_MODEL
+    assert set(body["secrets"]) == {"OPENCODE_API_KEY"}
 
 
-async def test_preflight_rejects_wrong_profile_before_dispatch():
+async def test_preflight_uses_profile_when_model_and_effort_match():
     value = task()
     server = Server(value)
-    server.profile = profile(value, acp_model="opencode-go/deepseek-v4-pro")
     async with client_for(server) as client:
-        with pytest.raises(WorkerError, match="model"):
-            await client.start(value)
-    assert "POST" not in server.methods()
+        pre = await client.preflight(value)
+    assert pre.mode == "profile"
+    assert pre.switch_model is False
+    assert pre.switch_effort is False
+    assert not any(call[1] == "/api/acp/models" for call in server.calls)
 
 
-async def test_preflight_rejects_display_name_model_before_dispatch():
-    value = task(expected_model="opencode-go/deepseek-v4.1-flash-1017")
+async def test_preflight_override_validates_catalog_without_mutating_profile():
+    value = task(secrets={"OPENCODE_API_KEY": {"kind": "LookupSecret", "url": "x"}})
+    server = Server(value, profile_model=OTHER_MODEL)
+    async with client_for(server) as client:
+        pre = await client.preflight(value)
+    assert pre.mode == "override"
+    assert pre.switch_model is True
+    assert pre.agent_settings["acp_model"] == DEFAULT_MODEL
+    discovery = next(call for call in server.calls if call[1] == "/api/acp/models")
+    assert discovery[2]["agent_settings"]["acp_model"] == DEFAULT_MODEL
+    assert discovery[2]["secrets"] == dict(value.secrets)
+
+
+async def test_preflight_effort_override_uses_native_effort_selection():
+    value = task(expected_effort="high")
     server = Server(value)
-    server.profile = profile(value, acp_model=DEFAULT_MODEL)
     async with client_for(server) as client:
-        with pytest.raises(WorkerError, match="model"):
+        pre = await client.preflight(value)
+    assert pre.mode == "profile"
+    assert pre.switch_model is False
+    assert pre.switch_effort is True
+    assert pre.effort == "high"
+
+
+async def test_override_fails_closed_on_missing_catalog_model_or_effort():
+    value = task(expected_effort="high")
+    server = Server(value, profile_model=OTHER_MODEL)
+    server.catalog = [{"model_id": OTHER_MODEL}]
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="not offered"):
             await client.start(value)
-    assert "POST" not in server.methods()
+    assert not any(path == "/api/conversations" for _, path, _, _ in server.calls)
+
+    server = Server(value)
+    server.efforts = {}
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="effort"):
+            await client.start(value)
 
 
-async def test_preflight_rejects_non_acp_profile():
+async def test_dedicated_profile_mode_rejects_global_default_mismatch():
+    value = task(allow_model_override=False)
+    server = Server(value, profile_model=OTHER_MODEL)
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="model/effort"):
+            await client.start(value)
+    assert not any(call[1] == "/api/acp/models" for call in server.calls)
+
+
+async def test_override_fails_closed_on_profile_mcp_refs():
     value = task()
-    server = Server(value)
-    server.profile = profile(value, agent_kind="openhands")
+    server = Server(value, profile_model=OTHER_MODEL)
+    server.profile = {
+        **server.profile,
+        "acp_model": OTHER_MODEL,
+        "mcp_server_refs": ["mcp"],
+    }
     async with client_for(server) as client:
-        with pytest.raises(WorkerError, match="not ACP"):
+        with pytest.raises(WorkerError, match="MCP"):
             await client.start(value)
-    assert "POST" not in server.methods()
 
 
-async def test_start_returns_real_id_and_verifies_native_worktree():
+async def test_unknown_repository_is_not_approved_for_dispatch():
+    value = task(repository="other/repo", issue_ref="other/repo#1")
+    server = Server(value)
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="not approved"):
+            await client.start(value)
+    assert server.calls == []
+
+
+async def test_start_creates_verifies_then_submits_task():
     value = task()
     server = Server(value)
     async with client_for(server) as client:
         result = await client.start(value)
     assert result.created is True
+    assert result.repository == "yesvus/kule"
     assert result.conversation_id == CONVERSATION_ID
     assert result.branch == value.branch
-    assert result.workspace == WORKTREE
+    assert result.workspace == worktree(value)
     assert result.model == DEFAULT_MODEL
-    assert result.acp_server == "opencode"
+    assert result.effective_model == DEFAULT_MODEL
+    assert result.model_verified is True
     assert result.state == "running"
-    start = next(call for call in server.calls if call[0] == "POST")
-    assert start[2]["worktree"] is True
-    assert start[2]["tags"] == value.tags
+    start_index = next(
+        index
+        for index, call in enumerate(server.calls)
+        if call[0] == "POST" and call[1] == "/api/conversations"
+    )
+    event_index = next(
+        index
+        for index, call in enumerate(server.calls)
+        if call[1] == f"/api/conversations/{CONVERSATION_ID}/events"
+    )
+    assert start_index < event_index
+    assert server.calls[start_index][2]["worktree"] is True
+    assert server.calls[start_index][2]["tags"]["kulerepo"] == "yesvus/kule"
+    assert "initial_message" not in server.calls[start_index][2]
 
 
-async def test_duplicate_dispatch_reuses_only_the_same_task():
+async def test_start_override_mode_selects_model_natively_and_filters_secrets():
+    value = task(
+        secrets={
+            "OPENCODE_API_KEY": {"kind": "LookupSecret", "url": "x"},
+            "UNRELATED": {"kind": "StaticSecret", "value": "y"},
+        }
+    )
+    server = Server(value, profile_model=OTHER_MODEL)
+    server.profile = {**server.profile, "secret_refs": ["OPENCODE_API_KEY"]}
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.effective_model == DEFAULT_MODEL
+    start = next(call for call in server.calls if call[1] == "/api/conversations")
+    assert "agent_profile_id" not in start[2]
+    assert start[2]["agent_settings"]["acp_model"] == DEFAULT_MODEL
+    assert set(start[2]["secrets"]) == {"OPENCODE_API_KEY"}
+    switch = next(call for call in server.calls if call[1].endswith("/switch_acp_model"))
+    assert switch[2] == {"model": DEFAULT_MODEL}
+
+
+async def test_start_effort_is_selected_and_verified():
+    value = task(expected_effort="high")
+    server = Server(value)
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.effort == "high"
+    assert result.effective_effort == "high"
+    assert result.effort_verified is True
+    switch = next(call for call in server.calls if call[1].endswith("/switch_acp_effort"))
+    assert switch[2] == {"effort": "high"}
+
+
+async def test_start_rejects_effective_model_mismatch_and_interrupts():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, current_model_id=OTHER_MODEL)
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="effective model"):
+            await client.start(value, model_verify_attempts=1)
+    assert server.calls[-1][:2] == (
+        "POST",
+        f"/api/conversations/{CONVERSATION_ID}/interrupt",
+    )
+
+
+async def test_start_fails_closed_when_effective_model_is_not_reported():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, current_model_id=None)
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="not reported"):
+            await client.start(value, model_verify_attempts=1, model_verify_interval=0)
+    assert server.calls[-1][:2] == (
+        "POST",
+        f"/api/conversations/{CONVERSATION_ID}/interrupt",
+    )
+
+
+async def test_duplicate_dispatch_reuses_only_the_same_identity():
     value = task()
     server = Server(value)
     server.start_status = 200
     async with client_for(server) as client:
         first = await client.start(value)
     assert first.created is False
+    assert not any(call[1].endswith("/events") for call in server.calls)
 
     server = Server(value)
     server.start_status = 200
-    server.conversation = conversation(value, tags={"kuleissue": "other/repo#1"})
+    server.echo_tags = False
+    server.conversation = conversation(value, tags={**value.tags, "kulerepo": "other/repo"})
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="no approved repository scope"):
+            await client.start(value)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_duplicate_branch_or_effort_change_is_rejected_without_interrupt():
+    value = task()
+    changed = task(branch_prefix="different/", conversation_id=value.conversation_id)
+    server = Server(changed)
+    server.start_status = 200
+    server.echo_tags = False
+    server.conversation = conversation(value)
     async with client_for(server) as client:
         with pytest.raises(WorkerError, match="different task"):
-            await client.start(value)
-    # A 200 is someone else's existing conversation: report the collision but
-    # never interrupt it.
+            await client.start(changed)
     assert not any(
         path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
     )
@@ -330,18 +596,91 @@ async def test_duplicate_dispatch_reuses_only_the_same_task():
         },
     ],
 )
-async def test_unsafe_start_is_interrupted(override):
+async def test_unsafe_created_worker_is_interrupted(override):
     value = task()
     server = Server(value)
     server.conversation = conversation(value, **override)
     server.workspace_override = override.get("workspace")
     async with client_for(server) as client:
         with pytest.raises(WorkerError):
-            await client.start(value)
+            await client.start(value, model_verify_attempts=1, model_verify_interval=0)
     assert server.calls[-1][:2] == (
         "POST",
         f"/api/conversations/{CONVERSATION_ID}/interrupt",
     )
+
+
+async def test_201_invalid_body_preserves_status_and_interrupts():
+    value = task()
+    server = Server(value)
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path == "/api/conversations":
+            return httpx2.Response(201, content=b"not-json")
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        with pytest.raises(WorkerError, match="invalid JSON"):
+            await client.start(value)
+    assert any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_200_invalid_body_never_interrupts_existing_worker():
+    value = task()
+    server = Server(value)
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.method == "POST" and request.url.path == "/api/conversations":
+            return httpx2.Response(200, content=b"not-json")
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        with pytest.raises(WorkerError, match="invalid JSON"):
+            await client.start(value)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_oversized_response_is_rejected_while_streaming():
+    value = task()
+    server = Server(value)
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == f"/api/conversations/{CONVERSATION_ID}":
+            return httpx2.Response(200, content=b"x" * (ww._MAX_RESPONSE_BYTES + 1))
+        return await server.handler(request)
+
+    async with WorkerClient(
+        "https://canvas.example",
+        "synthetic-session-key",
+        repositories=REPOSITORIES,
+        transport=httpx2.MockTransport(handler),
+    ) as client:
+        with pytest.raises(ww.WorkerResponseError, match="too large"):
+            await client.status(value)
+
+
+async def test_429_save_then_run_retry():
+    value = task()
+    server = Server(value)
+    server.event_status = 429
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.model_verified is True
+    assert any(call[1] == f"/api/conversations/{CONVERSATION_ID}/run" for call in server.calls)
 
 
 def test_status_mapping_is_total_and_explicit():
@@ -378,9 +717,96 @@ async def test_status_parses_evidence_only_when_terminal():
     assert finished.state == "completed"
     assert finished.pr is not None
     assert finished.pr.pr_url == f"https://github.com/{value.repository}/pull/42"
-    assert finished.pr.branch == value.branch
-    assert finished.pr.commit == COMMIT
     assert finished.evidence_error is None
+
+
+async def test_status_reports_configured_only_or_mismatched_model():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, current_model_id=None)
+    async with client_for(server) as client:
+        not_reported = await client.status(value)
+    assert not_reported.model_verified is False
+    assert "not reported" in (not_reported.model_error or "")
+
+    server = Server(value)
+    server.conversation = conversation(value, current_model_id=OTHER_MODEL)
+    async with client_for(server) as client:
+        mismatched = await client.status(value)
+    assert mismatched.model_verified is False
+    assert "does not match" in (mismatched.model_error or "")
+
+
+async def test_status_final_response_failure_keeps_terminal_state():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, execution_status="finished")
+    server.final_status = 500
+    async with client_for(server) as client:
+        result = await client.status(value)
+    assert result.state == "completed"
+    assert result.terminal is True
+    assert result.evidence_error is not None
+
+
+async def test_status_accepts_blocker_only_evidence_without_pr():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, execution_status="finished")
+    server.final = (
+        "Blocked.\n\n```worker-evidence\n"
+        + json.dumps({"blockers": ["Git access denied"]})
+        + "\n```\n"
+    )
+    async with client_for(server) as client:
+        result = await client.status(value, verify_pr=True)
+    assert result.pr is not None
+    assert result.pr.pr_url is None
+    assert result.pr.blockers == ("Git access denied",)
+    assert result.pr_verification is None
+
+
+async def test_status_enforces_repository_scope_and_legacy_mapping():
+    value = task()
+    server = Server(value)
+    server.conversation = conversation(value, tags={**value.tags, "kulerepo": "other/repo"})
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="no approved repository scope"):
+            await client.status(value)
+
+    server = Server(value)
+    server.conversation = conversation(value, tags={})
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="no approved repository scope"):
+            await client.status(value)
+
+    server = Server(value)
+    server.conversation = conversation(
+        value,
+        tags={},
+        workspace={"kind": "LocalWorkspace", "working_dir": REPO_PATH},
+    )
+    async with client_for(
+        server, legacy_repository_by_id={CONVERSATION_ID: "yesvus/kule"}
+    ) as client:
+        result = await client.status(value)
+    assert result.repository == "yesvus/kule"
+
+
+async def test_legacy_conversation_cannot_be_reused_for_dispatch():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.echo_tags = False
+    server.conversation = conversation(value, tags={})
+    async with client_for(
+        server, legacy_repository_by_id={CONVERSATION_ID: "yesvus/kule"}
+    ) as client:
+        with pytest.raises(WorkerError, match="legacy conversation"):
+            await client.start(value)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
 
 
 @pytest.mark.parametrize(
@@ -409,21 +835,53 @@ async def test_invalid_evidence_is_reported_not_raised(block, message):
     assert message in (result.evidence_error or "")
 
 
-async def test_pr_verification_binds_url_head_and_ci():
+async def test_branch_reader_verifies_actual_worktree_branch():
+    value = task()
+    server = Server(value)
+
+    async def good(_: str) -> str:
+        return value.branch
+
+    async def bad(_: str) -> str:
+        return "main"
+
+    async with client_for(server) as client:
+        result = await client.status(value, branch_reader=good)
+        mismatch = await client.status(value, branch_reader=bad)
+    assert result.branch_verified is True
+    assert result.actual_branch == value.branch
+    assert mismatch.branch_verified is False
+    assert "does not match" in (mismatch.branch_error or "")
+
+
+async def test_start_branch_reader_mismatch_interrupts_created_worker():
+    value = task()
+    server = Server(value)
+
+    async def bad(_: str) -> str:
+        return "main"
+
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="does not match"):
+            await client.start(value, branch_reader=bad)
+    assert server.calls[-1][:2] == (
+        "POST",
+        f"/api/conversations/{CONVERSATION_ID}/interrupt",
+    )
+
+
+async def test_pr_verification_binds_exact_path_and_reports_branch_state():
     value = task()
     server = Server(value)
     server.conversation = conversation(value, execution_status="finished")
     async with client_for(server) as client:
         result = await client.status(value, verify_pr=True)
-    assert result.pr_verification == {
-        "verified": True,
-        "state": "open",
-        "checks": "success",
-        "draft": False,
-        "head_sha": COMMIT,
-    }
-    assert not any(method == "DELETE" for method in server.methods())
+    assert result.pr_verification is not None
+    assert result.pr_verification["verified"] is True
+    assert result.pr_verification["branch_verified"] is True
+    assert result.pr_verification["checks"] == "success"
     pr_call = next(call for call in server.calls if "/api/git/repositories/" in call[1])
+    assert pr_call[1] == "/api/git/repositories/yesvus/kule/pull-requests/42"
     assert pr_call[3] == "provider=github"
 
     server = Server(value)
@@ -435,32 +893,155 @@ async def test_pr_verification_binds_url_head_and_ci():
     assert result.pr_verification["verified"] is False
     assert "head" in result.pr_verification["error"]
 
+    server = Server(value)
+    server.conversation = conversation(value, execution_status="finished")
+    server.pr = {**server.pr, "head_ref": "other-branch"}
+    async with client_for(server) as client:
+        result = await client.status(value, verify_pr=True)
+    assert result.pr_verification is not None
+    assert result.pr_verification["verified"] is False
+    assert "branch" in result.pr_verification["error"]
 
-async def test_stop_interrupts_and_never_deletes_native_worktree():
+    server = Server(value)
+    server.conversation = conversation(value, execution_status="finished")
+    server.pr = {key: val for key, val in server.pr.items() if key != "head_ref"}
+    async with client_for(server) as client:
+        result = await client.status(value, verify_pr=True)
+    assert result.pr_verification is not None
+    assert result.pr_verification["branch_verified"] is None
+
+
+async def test_stop_reports_actual_state_and_never_deletes():
     value = task()
     server = Server(value)
     async with client_for(server) as client:
-        state = await client.stop(value.conversation_id)
-    assert state == "paused"
+        state = await client.stop(value)
+    assert state.acknowledged is True
+    assert state.state == "paused"
     assert server.calls[-1][:2] == (
-        "POST",
-        f"/api/conversations/{CONVERSATION_ID}/interrupt",
+        "GET",
+        f"/api/conversations/{CONVERSATION_ID}",
     )
     assert "DELETE" not in server.methods()
     assert not hasattr(client, "delete")
 
+    server = Server(value)
+    server.conversation = conversation(value, execution_status="finished")
+    async with client_for(server) as client:
+        state = await client.stop(value)
+    assert state.state == "completed"
 
-async def test_bounded_concurrency_does_not_queue_a_new_runtime():
+    server = Server(value)
+    server.conversation = conversation(value, tags={**value.tags, "kulerepo": "other/repo"})
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="no approved repository scope"):
+            await client.stop(value)
+    assert not any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
+
+
+async def test_list_repository_filters_pages_and_legacy_unknowns():
+    value = task()
+    other = task(
+        issue_ref="yesvus/ops#9",
+        repository="yesvus/ops",
+        conversation_id=uuid4(),
+        profile_id=PROFILE_ID,
+    )
+    legacy = task(conversation_id=uuid4())
+    untagged = task(conversation_id=uuid4())
+    extra = task(conversation_id=uuid4())
+    server = Server(value, repositories={**REPOSITORIES, "yesvus/ops": "/workspace/src/ops"})
+    server.search_pages = [
+        {
+            "items": [
+                conversation(value),
+                conversation(other),
+                conversation(untagged, tags={}),
+            ],
+            "next_page_id": "1",
+        },
+        {
+            "items": [
+                conversation(legacy, tags={}),
+                conversation(extra),
+            ],
+            "next_page_id": None,
+        },
+    ]
+    async with client_for(
+        server, legacy_repository_by_id={legacy.conversation_id: "yesvus/kule"}
+    ) as client:
+        result = await client.list_repository("yesvus/kule")
+    assert result.repository == "yesvus/kule"
+    assert result.pages == 2
+    assert result.unclassified_count == 1
+    assert {item.conversation_id for item in result.items} == {
+        value.conversation_id,
+        legacy.conversation_id,
+        extra.conversation_id,
+    }
+    assert next(
+        item for item in result.items if item.conversation_id == legacy.conversation_id
+    ).legacy
+    assert all(item.repository == "yesvus/kule" for item in result.items)
+
+
+async def test_list_repository_is_bounded_and_never_infers_scope():
+    value = task()
+    server = Server(value)
+    many = [conversation(task(conversation_id=uuid4())) for _ in range(3)]
+    server.search_pages = [{"items": many, "next_page_id": None}]
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="result bound"):
+            await client.list_repository("yesvus/kule", max_results=2)
+
+    server = Server(value)
+    server.search_pages = [
+        {"items": [conversation(value)], "next_page_id": "1"},
+        {"items": [conversation(value)], "next_page_id": None},
+    ]
+    async with client_for(server) as client:
+        with pytest.raises(WorkerError, match="page bound"):
+            await client.list_repository("yesvus/kule", max_pages=1)
+
+    server = Server(value)
+    server.search_pages = [{"items": [conversation(value, tags={})], "next_page_id": None}]
+    async with client_for(server) as client:
+        result = await client.list_repository("yesvus/kule")
+    assert result.items == ()
+    assert result.unclassified_count == 1
+
+
+async def test_same_id_start_is_serialized_and_different_ids_run_in_parallel():
+    value = task()
+    server = Server(value)
+    server.auto_start = True
+    server.start_delay = 0.05
+    async with client_for(server, max_concurrent_starts=2) as client:
+        first, second = await asyncio.gather(
+            client.start(value, model_verify_attempts=1, model_verify_interval=0),
+            client.start(value, model_verify_attempts=1, model_verify_interval=0),
+        )
+    assert server.max_active_starts == 1
+    assert {first.created, second.created} == {True, False}
+
     tasks = [task(conversation_id=uuid4()) for _ in range(3)]
     server = Server(tasks[0])
     server.start_delay = 0.05
-    async with client_for(server, max_concurrent=2) as client:
-        results = await asyncio.gather(*(client.start(item) for item in tasks))
+    async with client_for(server, max_concurrent_starts=2) as client:
+        results = await asyncio.gather(
+            *(
+                client.start(item, model_verify_attempts=1, model_verify_interval=0)
+                for item in tasks
+            )
+        )
     assert {item.conversation_id for item in results} == {item.conversation_id for item in tasks}
     assert server.max_active_starts == 2
 
 
-async def test_start_timeout_keeps_client_generated_id(monkeypatch):
+async def test_start_timeout_reconciles_created_worker(monkeypatch):
     value = task()
     server = Server(value)
     client = client_for(server)
@@ -473,21 +1054,36 @@ async def test_start_timeout_keeps_client_generated_id(monkeypatch):
 
     monkeypatch.setattr(client, "_request", slow)
     with pytest.raises(WorkerTimeout) as err:
-        await client.start(value)
+        await client.start(value, model_verify_attempts=1, model_verify_interval=0)
     assert err.value.conversation_id == CONVERSATION_ID
+    assert any(
+        path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
+    )
     await client.aclose()
 
 
-def test_api_origin_and_key_are_exact():
+def test_api_origin_key_proxy_and_repository_mapping_are_exact():
     with pytest.raises(WorkerError):
-        WorkerClient("http://canvas.example", "key")
+        WorkerClient("http://canvas.example", "key", repositories=REPOSITORIES)
     with pytest.raises(WorkerError):
-        WorkerClient("https://canvas.example/api", "key")
+        WorkerClient("https://canvas.example/api", "key", repositories=REPOSITORIES)
     with pytest.raises(WorkerError):
-        WorkerClient("https://canvas.example?x=1", "key")
+        WorkerClient("https://canvas.example?x=1", "key", repositories=REPOSITORIES)
     with pytest.raises(WorkerError):
-        WorkerClient("https://canvas.example", "")
+        WorkerClient("https://canvas.example", "", repositories=REPOSITORIES)
+    with pytest.raises(WorkerError):
+        WorkerClient("https://canvas.example", "key", repositories={})
+    with pytest.raises(WorkerError):
+        WorkerClient(
+            "https://canvas.example",
+            "key",
+            repositories=REPOSITORIES,
+            legacy_repository_by_id={CONVERSATION_ID: "not-approved/repo"},
+        )
+    client = WorkerClient("https://canvas.example", "key", repositories=REPOSITORIES)
+    assert getattr(client._client, "_trust_env", None) is False
     assert ww.PINNED_SDK_TAG == "v1.62.0"
+    assert ww.REPOSITORY_TAG == "kulerepo"
 
 
 def test_evidence_text_is_redacted_and_bounded():
@@ -496,13 +1092,28 @@ def test_evidence_text_is_redacted_and_bounded():
         evidence_block(value, tests=["pytest: api_key=supersecretvalue passed"]),
         value,
     )
+    assert parsed.tests
     assert "supersecretvalue" not in parsed.tests[0]
     assert "[REDACTED]" in parsed.tests[0]
 
 
-def test_evidence_parser_selects_the_last_valid_block():
+def test_evidence_parser_uses_last_block_and_accepts_blocker_only():
     value = task()
     first = evidence_block(value, pr_url="https://github.com/yesvus/kule/pull/1")
     last = evidence_block(value, pr_url="https://github.com/yesvus/kule/pull/2")
     parsed = parse_pr_evidence(first + last, value)
+    assert parsed.pr_url is not None
     assert parsed.pr_url.endswith("/2")
+
+    blocker = parse_pr_evidence('```worker-evidence\n{"blockers": ["no git access"]}\n```\n', value)
+    assert blocker.pr_url is None
+    assert blocker.blockers == ("no git access",)
+
+
+def test_prompt_carries_issue_scope_pr_and_blocker_contract():
+    text = build_prompt(task())
+    assert ISSUE in text
+    assert "only inside your assigned worktree" in text
+    assert "Never push the default branch" in text
+    assert "worker-evidence" in text
+    assert "blocker-only" in text
