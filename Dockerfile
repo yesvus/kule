@@ -20,6 +20,9 @@ FROM python:3.13.9-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends openssh-client \
+    && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 operator-mcp \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent operator-mcp
 COPY --from=wheelhouse /wheelhouse /wheelhouse

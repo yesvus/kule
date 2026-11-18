@@ -173,6 +173,13 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
         if "argocdBaseUrl" in args:
             sanitized["argocd_base_url_override"] = True
         return sanitized
+    if tool == "host_exec":
+        metadata = _audit_text_digest(args.get("script"), 16384)
+        return {
+            "script_bytes": metadata.get("bytes"),
+            "script_sha256": metadata.get("sha256"),
+            "script_valid": metadata["valid"],
+        }
     if tool == "workspace_exec":
         metadata = _audit_text_digest(args.get("command"), 4096)
         return {
