@@ -1203,17 +1203,29 @@ async def test_lifespan_factory_is_callable_and_closes_the_owned_client():
     assert client.is_closed is True
 
 
-async def test_mount_uses_a_callable_lifespan_for_the_owned_client(monkeypatch):
+@pytest.mark.parametrize("explicit_ca", [False, True])
+async def test_mount_uses_a_callable_lifespan_for_the_owned_client(monkeypatch, explicit_ca):
+    import certifi
+
     monkeypatch.setenv(
         "KULE_OPENHANDS_REPOSITORIES", json.dumps({REPOSITORY: "/workspace/src/kule"})
     )
     monkeypatch.setenv("KULE_OPENHANDS_API_URL", ORIGIN)
     monkeypatch.setenv("KULE_OPENHANDS_API_KEY", "dedicated-service-key")
+    monkeypatch.delenv("KULE_OPENHANDS_CA_FILE", raising=False)
+    if explicit_ca:
+        monkeypatch.setenv("KULE_OPENHANDS_CA_FILE", certifi.where())
     created: dict[str, httpx2.AsyncClient] = {}
 
     def fake_client(
         origin: str, key: str, timeout: float, *, verify: bool | ssl.SSLContext = True
     ) -> httpx2.AsyncClient:
+        if explicit_ca:
+            assert isinstance(verify, ssl.SSLContext)
+            assert verify.verify_mode == ssl.CERT_REQUIRED
+            assert verify.check_hostname
+        else:
+            assert verify is True
         client = openhands._ScopedClient(
             base_url=origin,
             headers={"X-Session-API-Key": key},
