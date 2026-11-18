@@ -50,7 +50,6 @@ existing operator group; untagged tools fail closed.
 | Tool | Upstream operation | Tier |
 | --- | --- | --- |
 | `oh_list_conversations` | `GET /api/conversations/search` | read |
-| `oh_count_conversations` | `GET /api/conversations/count` | read |
 | `oh_get_conversation` | `GET /api/conversations/{id}` | read |
 | `oh_get_conversation_runtime` | `GET /api/conversations/{id}/runtime` | read |
 | `oh_search_events` | `GET /api/conversations/{id}/events/search` | read |
@@ -67,10 +66,36 @@ List and event search keep the upstream `limit` maximum of 100. Kule's existing
 `tools.max_output_bytes` still refuses an oversized serialized result rather than
 truncating it.
 
+### Repository scope
+
+Every conversation tool except `oh_list_agent_profiles` requires a canonical
+`repository` argument (`owner/name`, normalized to lowercase). The Canvas search API
+has no repository filter, so this cannot be passed upstream:
+
+- `oh_start_conversation` requires `repository` and forces the native tag
+  `kulerepo=owner/name`. A caller-supplied `kulerepo` with another value is rejected.
+  Issue, leg, task and model tags remain the worker's responsibility.
+- `oh_list_conversations` passes pagination upstream, then returns only items whose
+  native `tags.kulerepo` exactly matches the requested repository and preserves the
+  upstream `next_page_id`. One bounded upstream page (maximum 100) per call; callers
+  continue with `next_page_id`. Legacy conversations without `kulerepo` are omitted
+  and remain explicitly unclassified until an operator verifies their mapping.
+- Direct-ID reads and actions (`get`, runtime, events, event, run, interrupt, pause,
+  model switch) require `repository` and first read the native conversation tags.
+  A missing tag, a different tag, or an unverifiable preflight is denied before the
+  requested action. There is no unscoped ID bypass.
+- `oh_count_conversations` is not exposed because the upstream count endpoint cannot
+  be repository-scoped without global counting.
+
+LEG 2 owns worker filtering by issue, task, leg, model and status. This adapter only
+enforces the repository boundary and exposes the scoped/native fields it needs; it
+does not add a second worker registry or database.
+
 ### Launch request reduction
 
 `oh_start_conversation` accepts only:
 
+- `repository` — required canonical `owner/name`; enforced as `kulerepo`;
 - `workspace: {working_dir}` — required, normalized, and required to stay below
   `KULE_OPENHANDS_WORKSPACE_ROOT`;
 - `worktree` and `worktree_options` (`base`, `ref`, `branch_prefix`) — native Canvas
@@ -96,9 +121,12 @@ dropped.
 
 - Kule's existing OAuth group and audit middleware remain the outer boundary.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
-- A call-time target guard validates conversation UUIDs, the workspace root, worktree
-  option shape, text-only messages, profile presence and model identifier syntax
-  before any HTTP request.
+- A call-time target guard validates the repository, conversation UUIDs, the workspace
+  root, worktree option shape, text-only messages, profile presence and model
+  identifier syntax before any action. Direct-ID actions also verify the native
+  `kulerepo` tag with a read-only preflight.
+- Audit metadata includes the requested repository. The repository tag is written by
+  the adapter at launch; callers cannot silently relabel a conversation.
 - The shared HOME, UID and worktree are not a security boundary. The workspace-root
   check is target authorization, not process isolation; Canvas and the worker profile
   still govern what the agent can execute.
@@ -112,23 +140,28 @@ A worker dispatcher can use only these tools:
 
 1. `oh_list_agent_profiles` to resolve the exact ACP profile ID and its advertised
    model. Do not substitute a paid model silently.
-2. `oh_start_conversation` with `workspace.working_dir` set to the task repository,
-   `worktree: true`, the task branch prefix (for example
+2. `oh_start_conversation` with `repository`, `workspace.working_dir` set to the task
+   repository, `worktree: true`, the task branch prefix (for example
    `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and optionally a bounded
-   initial task message. The response returns the real native conversation ID.
+   initial task message. The response returns the real native conversation ID. Supply
+   the worker's `kuleissue`/`kuletask`/`kulemodel` tags as appropriate.
 3. If an exact per-conversation model override is required,
-   `oh_switch_acp_model(conversation_id, model)` with the verified catalog ID. The
-   stored profile is unchanged.
-4. `oh_send_message(..., run: true)` or `oh_run_conversation` to start work.
+   `oh_switch_acp_model(repository, conversation_id, model)` with the verified catalog
+   ID. The stored profile is unchanged.
+4. `oh_send_message(repository, ..., run: true)` or
+   `oh_run_conversation(repository, ...)` to start work.
 5. Poll `oh_get_conversation`, `oh_get_conversation_runtime` and `oh_search_events`
-   for status, failures and the final report. Reuse native conversation state; do
-   not persist a duplicate conversation database.
-6. `oh_interrupt_conversation` (or `oh_pause_conversation`) for cancellation and
-   timeout handling.
+   with `repository` for status, failures and the final report. Use
+   `oh_list_conversations(repository, ...)` with bounded `limit`/`next_page_id` for
+   discovery. Reuse native conversation state; do not persist a duplicate
+   conversation database.
+6. `oh_interrupt_conversation(repository, ...)` (or `oh_pause_conversation`) for
+   cancellation and timeout handling.
 
 Leg 2 remains responsible for duplicate-dispatch handling, bounded concurrency,
-branch/worktree mapping and verifying the worker's actual branch, commit, CI and PR.
-This adapter only returns what Canvas reports.
+branch/worktree mapping, issue/leg/task/model filtering and verifying the worker's
+actual branch, commit, CI and PR. This adapter only enforces repository scope and
+returns what Canvas reports.
 
 ## Separate Automation Service API (inventory only, not mounted)
 

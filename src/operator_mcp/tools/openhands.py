@@ -33,6 +33,7 @@ from fastmcp import FastMCP
 from fastmcp.exceptions import AuthorizationError
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.openapi import MCPType
+from fastmcp.tools.base import ToolResult
 
 from ..authz import OPERATE, READ
 
@@ -41,6 +42,7 @@ _SPEC_VERSION = "1.62.0"
 _DEFAULT_WORKSPACE_ROOT = "/workspace/src"
 _API_KEY_HEADER = "X-Session-API-Key"
 _MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
+_REPOSITORY = re.compile(r"^(?!\.{1,2}/)(?!.*/\.{1,2}$)[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
 _BRANCH_PREFIX = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]{0,200})?$")
 _TAG_KEY = re.compile(r"^[a-z0-9]{1,64}$")
@@ -67,13 +69,6 @@ _ENDPOINTS: dict[str, _Endpoint] = {
         "get",
         "/api/conversations/search",
         frozenset({"page_id", "limit", "status", "sort_order"}),
-    ),
-    "count_conversations_api_conversations_count_get": _Endpoint(
-        "count_conversations",
-        READ,
-        "get",
-        "/api/conversations/count",
-        frozenset({"status"}),
     ),
     "get_conversation_api_conversations__conversation_id__get": _Endpoint(
         "get_conversation",
@@ -168,6 +163,7 @@ _ENDPOINTS: dict[str, _Endpoint] = {
 
 _START_FIELDS = frozenset(
     {
+        "repository",
         "workspace",
         "worktree",
         "worktree_options",
@@ -181,6 +177,7 @@ _START_FIELDS = frozenset(
 )
 _AUDIT_FIELDS = frozenset(
     {
+        "repository",
         "conversation_id",
         "event_id",
         "limit",
@@ -345,8 +342,25 @@ def _route_type(route: Any, route_type: MCPType) -> MCPType:
 
 def _component(route: Any, component: Any) -> None:
     endpoint = _ENDPOINTS.get(route.operation_id or "")
-    if endpoint is not None:
-        component.tags = {endpoint.tier}
+    if endpoint is None:
+        return
+    component.tags = {endpoint.tier}
+    if endpoint.tool == "list_agent_profiles":
+        return
+    # Repository scope is a Kule target-authorization parameter. It is not sent
+    # upstream; the guard removes it and enforces the native kulerepo tag.
+    properties = component.parameters.setdefault("properties", {})
+    properties["repository"] = {
+        "type": "string",
+        "pattern": _REPOSITORY.pattern,
+        "maxLength": 150,
+        "title": "Repository",
+        "description": "Canonical owner/name; enforced against the native kulerepo tag.",
+    }
+    required = list(component.parameters.get("required") or [])
+    if "repository" not in required:
+        required.append("repository")
+    component.parameters["required"] = required
 
 
 def _client(origin: str, key: str, timeout_seconds: float) -> httpx2.AsyncClient:
@@ -401,6 +415,13 @@ def _conversation_id(value: Any) -> str:
         return str(uuid.UUID(value))
     except (ValueError, AttributeError):
         raise AuthorizationError("OpenHands conversation target is not permitted") from None
+
+
+def _repository(value: Any) -> str:
+    if not isinstance(value, str) or len(value) > 150 or not _REPOSITORY.fullmatch(value):
+        raise AuthorizationError("OpenHands repository target is not permitted")
+    # GitHub owner/name scope is case-insensitive; keep one native tag value.
+    return value.lower()
 
 
 def _event_id(value: Any) -> None:
@@ -464,33 +485,50 @@ def audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
 
 
 class _TargetGuard(Middleware):
-    """Authorize the target path and reject unsafe message shapes before HTTP."""
+    """Enforce repository scope and safe launch targets before any HTTP call."""
 
-    def __init__(self, workspace_root: str) -> None:
+    def __init__(self, client: httpx2.AsyncClient, workspace_root: str) -> None:
+        self.client = client
         self.workspace_root = workspace_root
 
     async def on_call_tool(self, context, call_next):
         name = context.message.name
         arguments = dict(context.message.arguments or {})
+        repository: str | None = None
 
         if name == "start_conversation":
             self._start(arguments)
+            repository = _repository(arguments.pop("repository"))
+            tags = dict(arguments.get("tags") or {})
+            tags["kulerepo"] = repository
+            arguments["tags"] = tags
+        elif name == "list_conversations":
+            repository = _repository(arguments.pop("repository", None))
+            self._pagination(arguments)
         elif name == "send_message":
-            if set(arguments) - {"conversation_id", "content", "run"}:
-                raise AuthorizationError("OpenHands message is not permitted")
-            _conversation_id(arguments.get("conversation_id"))
+            repository, conversation_id = self._scope(
+                arguments, {"repository", "conversation_id", "content", "run"}
+            )
             message = {"content": arguments.get("content")}
             if "run" in arguments:
                 message["run"] = arguments["run"]
             if _message_size(message) is None:
                 raise AuthorizationError("OpenHands message is not permitted")
+            await self._verify_repository(repository, conversation_id)
         elif name == "switch_acp_model":
-            if set(arguments) != {"conversation_id", "model"}:
-                raise AuthorizationError("OpenHands model switch is not permitted")
-            _conversation_id(arguments.get("conversation_id"))
+            repository, conversation_id = self._scope(
+                arguments, {"repository", "conversation_id", "model"}
+            )
             model = arguments.get("model")
             if not isinstance(model, str) or not _MODEL.fullmatch(model):
                 raise AuthorizationError("OpenHands model identifier is not permitted")
+            await self._verify_repository(repository, conversation_id)
+        elif name == "get_event":
+            repository, conversation_id = self._scope(
+                arguments, {"repository", "conversation_id", "event_id"}
+            )
+            _event_id(arguments.get("event_id"))
+            await self._verify_repository(repository, conversation_id)
         elif name in {
             "get_conversation",
             "get_conversation_runtime",
@@ -499,16 +537,58 @@ class _TargetGuard(Middleware):
             "interrupt_conversation",
             "pause_conversation",
         }:
-            _conversation_id(arguments.get("conversation_id"))
-        elif name == "get_event":
-            _conversation_id(arguments.get("conversation_id"))
-            _event_id(arguments.get("event_id"))
+            repository, conversation_id = self._scope(arguments, {"repository", "conversation_id"})
+            if name == "search_events":
+                self._pagination(arguments)
+            await self._verify_repository(repository, conversation_id)
 
-        return await call_next(context)
+        context.message.arguments = arguments
+        result = await call_next(context)
+        if name == "list_conversations":
+            return _filter_repository(result, repository)
+        return result
+
+    @staticmethod
+    def _pagination(arguments: dict[str, Any]) -> None:
+        if "limit" in arguments:
+            limit = arguments["limit"]
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
+                raise AuthorizationError("OpenHands pagination is not permitted")
+        if "page_id" in arguments:
+            page_id = arguments["page_id"]
+            if page_id is not None and (not isinstance(page_id, str) or len(page_id) > 1024):
+                raise AuthorizationError("OpenHands pagination is not permitted")
+
+    @staticmethod
+    def _scope(arguments: dict[str, Any], allowed: set[str]) -> tuple[str, str]:
+        if set(arguments) - allowed:
+            raise AuthorizationError("OpenHands conversation scope is not permitted")
+        repository = _repository(arguments.pop("repository", None))
+        conversation_id = _conversation_id(arguments.get("conversation_id"))
+        return repository, conversation_id
+
+    async def _verify_repository(self, repository: str, conversation_id: str) -> None:
+        """Verify the native kulerepo tag before any direct conversation action."""
+        try:
+            response = await self.client.get(f"/api/conversations/{conversation_id}")
+        except httpx2.HTTPError:
+            raise AuthorizationError("OpenHands conversation scope is not verified") from None
+        if response.status_code != 200:
+            raise AuthorizationError("OpenHands conversation scope is not verified")
+        try:
+            conversation = response.json()
+        except ValueError:
+            raise AuthorizationError("OpenHands conversation scope is not verified") from None
+        if not isinstance(conversation, dict) or conversation.get("id") != conversation_id:
+            raise AuthorizationError("OpenHands conversation scope is not verified")
+        tags = conversation.get("tags")
+        if not isinstance(tags, dict) or tags.get("kulerepo") != repository:
+            raise AuthorizationError("OpenHands conversation is outside the requested repository")
 
     def _start(self, arguments: dict[str, Any]) -> None:
         if set(arguments) - _START_FIELDS:
             raise AuthorizationError("OpenHands launch field is not permitted")
+        repository = _repository(arguments.get("repository"))
         workspace = arguments.get("workspace")
         if not isinstance(workspace, dict) or set(workspace) != {"working_dir"}:
             raise AuthorizationError("OpenHands workspace target is not permitted")
@@ -573,6 +653,25 @@ class _TargetGuard(Middleware):
                 )
             ):
                 raise AuthorizationError("OpenHands tags are not permitted")
+            existing = tags.get("kulerepo")
+            if existing is not None and existing.lower() != repository:
+                raise AuthorizationError("OpenHands repository tag is not permitted")
+
+
+def _filter_repository(result: ToolResult, repository: str | None) -> ToolResult:
+    """Return only conversations carrying the exact native kulerepo tag."""
+    data = result.structured_content
+    if repository is None or not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        raise AuthorizationError("OpenHands conversation list is invalid")
+    items = []
+    for item in data["items"]:
+        tags = item.get("tags") if isinstance(item, dict) else None
+        if isinstance(tags, dict) and tags.get("kulerepo") == repository:
+            items.append(item)
+    return ToolResult(
+        structured_content={"items": items, "next_page_id": data.get("next_page_id")},
+        meta=result.meta,
+    )
 
 
 def _worktree_options(value: Any) -> bool:
@@ -619,7 +718,7 @@ def mount(
         strict_input_validation=True,
         lifespan=lifespan,
     )
-    backend.add_middleware(_TargetGuard(root))
+    backend.add_middleware(_TargetGuard(client, root))
     # Parent middleware gates tools, not arbitrary upstream resources/prompts.
     backend.disable(components={"resource", "template", "prompt"})
     mcp.mount(backend, namespace="oh")

@@ -8,7 +8,7 @@ from pathlib import Path
 import httpx2
 import pytest
 from fastmcp import Client, FastMCP
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import AuthorizationError, ToolError
 from helpers import OPERATOR, OUTSIDER
 
 from operator_mcp.audit import AuditLog, verify
@@ -19,10 +19,13 @@ from operator_mcp.tools import openhands
 
 ORIGIN = "https://canvas.example.test:8000"
 CONVERSATION = "11111111-1111-1111-1111-111111111111"
+OTHER_CONVERSATION = "44444444-4444-4444-4444-444444444444"
+LEGACY = "33333333-3333-3333-3333-333333333333"
 PROFILE = "22222222-2222-2222-2222-222222222222"
+REPOSITORY = "yesvus/kule"
+OTHER_REPOSITORY = "other/repo"
 READ_TOOLS = {
     "oh_list_conversations",
-    "oh_count_conversations",
     "oh_get_conversation",
     "oh_get_conversation_runtime",
     "oh_search_events",
@@ -74,7 +77,7 @@ def test_pinned_fixture_and_endpoint_allowlist():
     assert all(len(operations) == 1 for operations in restricted["paths"].values())
 
     start = restricted["components"]["schemas"]["StartConversationRequest"]
-    assert set(start["properties"]) == openhands._START_FIELDS
+    assert set(start["properties"]) == openhands._START_FIELDS - {"repository"}
     assert start["required"] == ["workspace", "agent_profile_id"]
     assert start["additionalProperties"] is False
     assert "agent_settings" not in start["properties"]
@@ -92,6 +95,13 @@ def test_text_message_validation_allows_an_omitted_run_flag():
     assert openhands._message_size({"content": [{"text": "hello"}], "run": True}) == 5
     assert openhands._message_size({"content": [{"text": "hello"}], "run": None}) is None
     assert openhands._message_size({"content": [{"text": "x" * (32 * 1024 + 1)}]}) is None
+
+
+def test_repository_scope_normalizes_and_rejects_non_canonical_names():
+    assert openhands._repository("YesVus/Kule") == REPOSITORY
+    for value in ("", "kule", "a/b/c", "../kule", "yesvus/..", "yesvus /kule"):
+        with pytest.raises(AuthorizationError, match="repository target"):
+            openhands._repository(value)
 
 
 def test_fixed_https_origin_and_service_key_validation():
@@ -156,6 +166,7 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
             tools = {tool.name: tool for tool in await caller.list_tools()}
     start = tools["oh_start_conversation"].input_schema
     assert set(start["properties"]) == {
+        "repository",
         "workspace",
         "worktree",
         "worktree_options",
@@ -166,7 +177,8 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
         "tags",
         "autotitle",
     }
-    assert start["required"] == ["workspace", "agent_profile_id"]
+    assert start["required"] == ["workspace", "agent_profile_id", "repository"]
+    assert "repository" in start["properties"]
     assert start["properties"]["workspace"]["additionalProperties"] is False
     assert set(start["properties"]["workspace"]["properties"]) == {"working_dir"}
     initial = start["properties"]["initial_message"]["anyOf"][0]
@@ -177,7 +189,11 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
     assert item["properties"]["text"]["maxLength"] == 32 * 1024
 
     send = tools["oh_send_message"].input_schema
-    assert set(send["properties"]) == {"conversation_id", "content", "run"}
+    assert set(send["properties"]) == {"repository", "conversation_id", "content", "run"}
+    assert send["required"] == ["conversation_id", "content", "repository"]
+    listed = tools["oh_list_conversations"].input_schema
+    assert listed["required"] == ["repository"]
+    assert "repository" in tools["oh_run_conversation"].input_schema["required"]
 
 
 async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
@@ -188,6 +204,11 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
         requests.append(request)
         return httpx2.Response(200, json={"ok": True})
 
+    start = {
+        "repository": REPOSITORY,
+        "workspace": {"working_dir": "/workspace/src/kule"},
+        "agent_profile_id": PROFILE,
+    }
     async with httpx2.AsyncClient(
         base_url=ORIGIN, transport=httpx2.MockTransport(handler)
     ) as client:
@@ -200,17 +221,17 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
             ):
                 with pytest.raises(ToolError, match="workspace target"):
                     await caller.call_tool(
-                        "oh_start_conversation",
-                        {"workspace": workspace, "agent_profile_id": PROFILE},
+                        "oh_start_conversation", {**start, "workspace": workspace}
+                    )
+            for repository in ("not-a-repo", "a/b/c", "../repo"):
+                with pytest.raises(ToolError, match="repository target"):
+                    await caller.call_tool(
+                        "oh_start_conversation", {**start, "repository": repository}
                     )
             with pytest.raises(ToolError, match="require worktree=true"):
                 await caller.call_tool(
                     "oh_start_conversation",
-                    {
-                        "workspace": {"working_dir": "/workspace/src/kule"},
-                        "agent_profile_id": PROFILE,
-                        "worktree_options": {"base": "head"},
-                    },
+                    {**start, "worktree_options": {"base": "head"}},
                 )
             for options in (
                 {"base": "evil"},
@@ -221,12 +242,7 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                 with pytest.raises(ToolError, match="worktree options"):
                     await caller.call_tool(
                         "oh_start_conversation",
-                        {
-                            "workspace": {"working_dir": "/workspace/src/kule"},
-                            "agent_profile_id": PROFILE,
-                            "worktree": True,
-                            "worktree_options": options,
-                        },
+                        {**start, "worktree": True, "worktree_options": options},
                     )
             for field, value in (
                 ("max_iterations", "many"),
@@ -237,41 +253,34 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                 ("autotitle", "yes"),
             ):
                 with pytest.raises(ToolError, match="not permitted"):
-                    await caller.call_tool(
-                        "oh_start_conversation",
-                        {
-                            "workspace": {"working_dir": "/workspace/src/kule"},
-                            "agent_profile_id": PROFILE,
-                            field: value,
-                        },
-                    )
+                    await caller.call_tool("oh_start_conversation", {**start, field: value})
+            with pytest.raises(ToolError, match="repository tag"):
+                await caller.call_tool(
+                    "oh_start_conversation",
+                    {**start, "tags": {"kulerepo": OTHER_REPOSITORY}},
+                )
             with pytest.raises(ToolError, match="agent profile"):
                 await caller.call_tool(
                     "oh_start_conversation",
-                    {
-                        "workspace": {"working_dir": "/workspace/src/kule"},
-                        "agent_profile_id": "not-a-uuid",
-                    },
+                    {**start, "agent_profile_id": "not-a-uuid"},
                 )
             with pytest.raises(ToolError, match="event target"):
                 await caller.call_tool(
                     "oh_get_event",
-                    {"conversation_id": CONVERSATION, "event_id": "../../settings"},
+                    {
+                        "repository": REPOSITORY,
+                        "conversation_id": CONVERSATION,
+                        "event_id": "../../settings",
+                    },
                 )
             for forbidden in ("secrets", "hook_config", "agent_settings", "tool_module_qualnames"):
                 with pytest.raises(ToolError, match="launch field is not permitted"):
-                    await caller.call_tool(
-                        "oh_start_conversation",
-                        {
-                            "workspace": {"working_dir": "/workspace/src/kule"},
-                            "agent_profile_id": PROFILE,
-                            forbidden: {},
-                        },
-                    )
-            with pytest.raises(ToolError, match="Unknown arguments: role|message is not permitted"):
+                    await caller.call_tool("oh_start_conversation", {**start, forbidden: {}})
+            with pytest.raises(ToolError, match="conversation scope is not permitted"):
                 await caller.call_tool(
                     "oh_send_message",
                     {
+                        "repository": REPOSITORY,
                         "conversation_id": CONVERSATION,
                         "content": [{"type": "text", "text": "hello"}],
                         "role": "system",
@@ -281,6 +290,7 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                 await caller.call_tool(
                     "oh_send_message",
                     {
+                        "repository": REPOSITORY,
                         "conversation_id": CONVERSATION,
                         "content": [{"type": "image", "text": "not text"}],
                     },
@@ -289,9 +299,23 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                 await caller.call_tool(
                     "oh_send_message",
                     {
+                        "repository": REPOSITORY,
                         "conversation_id": "not-a-uuid",
                         "content": [{"type": "text", "text": "hello"}],
                     },
+                )
+            with pytest.raises(ToolError, match="repository target"):
+                await caller.call_tool(
+                    "oh_send_message",
+                    {
+                        "conversation_id": CONVERSATION,
+                        "content": [{"type": "text", "text": "hello"}],
+                    },
+                )
+            with pytest.raises(ToolError, match="pagination"):
+                await caller.call_tool(
+                    "oh_list_conversations",
+                    {"repository": REPOSITORY, "limit": 101},
                 )
     _assert_no_request(requests)
 
@@ -308,13 +332,32 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                 200,
                 json={
                     "items": [
-                        {"id": CONVERSATION, "execution_status": "running"},
+                        {
+                            "id": CONVERSATION,
+                            "execution_status": "running",
+                            "tags": {"kulerepo": REPOSITORY, "kuleissue": "yesvus/kule#23"},
+                        },
+                        {
+                            "id": OTHER_CONVERSATION,
+                            "execution_status": "running",
+                            "tags": {"kulerepo": OTHER_REPOSITORY},
+                        },
+                        {"id": LEGACY, "execution_status": "finished"},
                     ],
-                    "next_page_id": None,
+                    "next_page_id": "next-page",
                 },
             )
         if request.url.path == "/api/conversations":
             return httpx2.Response(200, json={"id": CONVERSATION, "execution_status": "idle"})
+        if request.url.path == f"/api/conversations/{CONVERSATION}":
+            return httpx2.Response(
+                200,
+                json={
+                    "id": CONVERSATION,
+                    "execution_status": "running",
+                    "tags": {"kulerepo": REPOSITORY},
+                },
+            )
         return httpx2.Response(200, json={"ok": True})
 
     async with httpx2.AsyncClient(
@@ -324,11 +367,15 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
     ) as client:
         openhands.mount(mcp, client=client)
         async with Client(mcp) as caller:
-            listed = await caller.call_tool("oh_list_conversations", {"limit": 5})
-            assert listed.data["items"][0]["execution_status"] == "running"
+            listed = await caller.call_tool(
+                "oh_list_conversations", {"repository": REPOSITORY, "limit": 5}
+            )
+            assert [item["id"] for item in listed.data["items"]] == [CONVERSATION]
+            assert listed.data["next_page_id"] == "next-page"
             started = await caller.call_tool(
                 "oh_start_conversation",
                 {
+                    "repository": REPOSITORY,
                     "workspace": {"working_dir": "/workspace/src/kule"},
                     "worktree": True,
                     "worktree_options": {
@@ -336,6 +383,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                         "branch_prefix": "oh23/ws-oh-mcp/",
                     },
                     "agent_profile_id": PROFILE,
+                    "tags": {"kuleissue": "yesvus/kule#23"},
                     "initial_message": {"content": [{"type": "text", "text": prompt}]},
                     "max_iterations": 100,
                 },
@@ -344,22 +392,29 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
             await caller.call_tool(
                 "oh_send_message",
                 {
+                    "repository": REPOSITORY,
                     "conversation_id": CONVERSATION,
                     "content": [{"type": "text", "text": prompt}],
                     "run": True,
                 },
             )
-            await caller.call_tool("oh_interrupt_conversation", {"conversation_id": CONVERSATION})
+            await caller.call_tool(
+                "oh_interrupt_conversation",
+                {"repository": REPOSITORY, "conversation_id": CONVERSATION},
+            )
 
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/conversations/search"),
         ("POST", "/api/conversations"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
         ("POST", f"/api/conversations/{CONVERSATION}/events"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
         ("POST", f"/api/conversations/{CONVERSATION}/interrupt"),
     ]
     assert all(
         request.headers["X-Session-API-Key"] == "dedicated-service-key" for request in requests
     )
+    assert "repository" not in requests[0].url.params
     body = json.loads(requests[1].content)
     assert body == {
         "workspace": {"working_dir": "/workspace/src/kule"},
@@ -367,6 +422,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
         "worktree_options": {"base": "default_branch", "branch_prefix": "oh23/ws-oh-mcp/"},
         "initial_message": {"content": [{"type": "text", "text": prompt}]},
         "agent_profile_id": PROFILE,
+        "tags": {"kuleissue": "yesvus/kule#23", "kulerepo": REPOSITORY},
         "max_iterations": 100,
     }
 
@@ -378,6 +434,58 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
     assert start["args"]["initial_message"]["valid"] is True
     assert start["args"]["initial_message"]["sha256"]
     assert start["args"]["working_dir"] == "/workspace/src/kule"
+
+
+async def test_direct_id_actions_require_matching_native_repository_tag(gateway):
+    mcp, _, _ = gateway
+    requests: list[httpx2.Request] = []
+    tags = {
+        CONVERSATION: {"kulerepo": REPOSITORY},
+        OTHER_CONVERSATION: {"kulerepo": OTHER_REPOSITORY},
+        LEGACY: {},
+    }
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        path = request.url.path
+        if request.method == "GET" and path.startswith("/api/conversations/"):
+            conversation_id = path.rsplit("/", 1)[-1]
+            if conversation_id in tags:
+                return httpx2.Response(
+                    200, json={"id": conversation_id, "tags": tags[conversation_id]}
+                )
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            with pytest.raises(ToolError, match="outside the requested repository"):
+                await caller.call_tool(
+                    "oh_run_conversation",
+                    {"repository": REPOSITORY, "conversation_id": OTHER_CONVERSATION},
+                )
+            with pytest.raises(ToolError, match="outside the requested repository"):
+                await caller.call_tool(
+                    "oh_get_conversation",
+                    {"repository": REPOSITORY, "conversation_id": LEGACY},
+                )
+            with pytest.raises(ToolError, match="repository target"):
+                await caller.call_tool("oh_run_conversation", {"conversation_id": CONVERSATION})
+            assert (
+                await caller.call_tool(
+                    "oh_run_conversation",
+                    {"repository": REPOSITORY, "conversation_id": CONVERSATION},
+                )
+            ).data == {"ok": True}
+
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", f"/api/conversations/{OTHER_CONVERSATION}"),
+        ("GET", f"/api/conversations/{LEGACY}"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
+        ("POST", f"/api/conversations/{CONVERSATION}/run"),
+    ]
 
 
 def test_build_server_mounts_openhands_only_when_enabled(make_cfg, claims, monkeypatch):
@@ -406,6 +514,6 @@ async def test_outsider_sees_no_openhands_tools(gateway):
         async with Client(mcp) as caller:
             assert await caller.list_tools() == []
             with pytest.raises(ToolError, match="not authorized"):
-                await caller.call_tool("oh_list_conversations", {})
+                await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
     records = [json.loads(line) for line in Path(audit).read_text().splitlines()]
     assert records[-1]["event"] == "denied"

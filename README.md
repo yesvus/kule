@@ -196,7 +196,8 @@ break-glass until the Kule operator functionality is independently tested.
 management API imported from the pinned 1.62.0 OpenAPI schema. It requires a fixed
 HTTPS origin, a dedicated `X-Session-API-Key`, and an approved workspace root.
 Conversation launch, status, events, messaging, stop and per-conversation ACP model
-switch are allowlisted; bash, files, secrets, settings, profile mutation, plugins and
-the separate Automation Service are not exposed. See [docs/openhands.md](docs/openhands.md)
-for the contract, leg 2 interface and live-rollout gates. No live Canvas call or
-cluster change is included.
+switch are allowlisted and require an explicit repository scope backed by the native
+`kulerepo` tag. Bash, files, secrets, settings, profile mutation, plugins and the
+separate Automation Service are not exposed. See
+[docs/openhands.md](docs/openhands.md) for the contract, leg 2 interface and
+live-rollout gates. No live Canvas call or cluster change is included.
