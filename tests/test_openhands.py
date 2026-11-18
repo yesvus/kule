@@ -1218,7 +1218,7 @@ async def test_mount_uses_a_callable_lifespan_for_the_owned_client(monkeypatch, 
     created: dict[str, httpx2.AsyncClient] = {}
 
     def fake_client(
-        origin: str, key: str, timeout: float, *, verify: bool | ssl.SSLContext = True
+        origin: str, key: str, timeout: float, *, verify: bool | ssl.SSLContext
     ) -> httpx2.AsyncClient:
         if explicit_ca:
             assert isinstance(verify, ssl.SSLContext)
