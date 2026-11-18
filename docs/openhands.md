@@ -99,8 +99,8 @@ has no repository filter, so this cannot be passed upstream:
   because a rename can move an already-scanned conversation and skip an unread one.
   `oh_list_conversations` advertises only the stable creation-order values.
 - Direct-ID reads and actions (`get`, runtime, events, event, send message, rename,
-  run, interrupt, pause, model switch) require `repository` and first read the native
-  conversation tags. A missing tag, a different tag, or an unverifiable preflight is
+  run, interrupt, pause, model switch, effort switch) require `repository` and first
+  read the native conversation tags. A missing tag, a different tag, or an unverifiable preflight is
   denied before the requested action. There is no unscoped ID bypass.
 - `oh_search_events` keeps the native event filters (`kind`, `source`, `body`,
   `sort_order`, `timestamp__gte`, `timestamp__lt`) and bounded `limit`/`page_id`
@@ -189,8 +189,9 @@ the cooperative alternative.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
 - A call-time target guard validates the approved repository mapping, conversation
   UUIDs, the exact repository path, worktree option shape, text-only messages, numeric
-  bounds, profile presence and model identifier syntax before any action. Direct-ID
-  actions also verify the native `kulerepo` tag with a read-only preflight.
+  bounds, profile presence, model identifier syntax and effort identifier syntax before
+  any action. Direct-ID actions also verify the native `kulerepo` tag with a read-only
+  preflight.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
   does not create a client or contact Canvas. When the adapter is disabled, none of
