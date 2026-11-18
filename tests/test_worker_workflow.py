@@ -1248,6 +1248,16 @@ def test_agent_settings_allows_blank_command_and_empty_args():
     )
     assert "acp_command" not in settings
     assert settings["acp_args"] == [""]
+    with pytest.raises(WorkerError, match="command is invalid"):
+        ww._agent_settings_from_profile(
+            {
+                "acp_server": "opencode",
+                "acp_model": DEFAULT_MODEL,
+                "acp_command": ["", "arg"],
+            },
+            DEFAULT_MODEL,
+            None,
+        )
 
     with pytest.raises(WorkerError, match="custom ACP"):
         ww._agent_settings_from_profile(

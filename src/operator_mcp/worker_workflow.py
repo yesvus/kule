@@ -673,7 +673,10 @@ def _agent_settings_from_profile(
             except ValueError:
                 raise WorkerError("the profile ACP command is not parseable") from None
         elif isinstance(command, list) and all(isinstance(item, str) for item in command):
-            settings["acp_command"] = list(command)
+            if command:
+                if not command[0].strip():
+                    raise WorkerError("the profile ACP command is invalid")
+                settings["acp_command"] = list(command)
         else:
             raise WorkerError("the profile ACP command is invalid")
     arguments = profile.get("acp_args")
