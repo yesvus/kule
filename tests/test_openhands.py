@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import ssl
 import threading
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1210,7 +1211,9 @@ async def test_mount_uses_a_callable_lifespan_for_the_owned_client(monkeypatch):
     monkeypatch.setenv("KULE_OPENHANDS_API_KEY", "dedicated-service-key")
     created: dict[str, httpx2.AsyncClient] = {}
 
-    def fake_client(origin: str, key: str, timeout: float) -> httpx2.AsyncClient:
+    def fake_client(
+        origin: str, key: str, timeout: float, *, verify: bool | ssl.SSLContext = True
+    ) -> httpx2.AsyncClient:
         client = openhands._ScopedClient(
             base_url=origin,
             headers={"X-Session-API-Key": key},
@@ -1225,6 +1228,24 @@ async def test_mount_uses_a_callable_lifespan_for_the_owned_client(monkeypatch):
     async with Client(mcp) as caller:
         await caller.list_tools()
     assert created["client"].is_closed is True
+
+
+def test_explicit_canvas_ca_bundle_is_validated(tmp_path, monkeypatch):
+    import certifi
+
+    ca_file = Path(certifi.where())
+    context = openhands._tls_verify({"KULE_OPENHANDS_CA_FILE": str(ca_file)})
+    assert isinstance(context, ssl.SSLContext)
+    assert context.verify_mode == ssl.CERT_REQUIRED
+    assert context.check_hostname
+    assert context.cert_store_stats()["x509_ca"] > 0
+    monkeypatch.setenv("SSL_CERT_FILE", "/nonexistent/ambient-ca.pem")
+    assert openhands._tls_verify({}) is True
+    invalid = tmp_path / "invalid.pem"
+    invalid.write_text("not a certificate", encoding="utf-8")
+    for raw in ("", "relative.pem", str(tmp_path / "missing.pem"), str(invalid)):
+        with pytest.raises(RuntimeError, match="KULE_OPENHANDS_CA_FILE"):
+            openhands._tls_verify({"KULE_OPENHANDS_CA_FILE": raw})
 
 
 def test_enabled_check_config_validates_canvas_settings(tmp_path, monkeypatch, capsys):
@@ -1259,6 +1280,10 @@ client_id = "client"
     monkeypatch.setenv("KULE_OPENHANDS_API_KEY", "dedicated-service-key")
     assert main(["check-config", "--config", str(config)]) == 0
     assert "config ok" in capsys.readouterr().out
+
+    monkeypatch.setenv("KULE_OPENHANDS_CA_FILE", str(tmp_path / "missing.pem"))
+    assert main(["check-config", "--config", str(config)]) == 2
+    assert "KULE_OPENHANDS_CA_FILE" in capsys.readouterr().err
 
     monkeypatch.setenv("KULE_OPENHANDS_ENABLED", "0")
     for name in (
