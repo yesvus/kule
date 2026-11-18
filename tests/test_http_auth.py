@@ -78,7 +78,9 @@ def oidc_discovery_url() -> Iterator[str]:
 
 
 @asynccontextmanager
-async def running_app(make_cfg, oidc_url: str, monkeypatch, tmp_path, *, auth=None) -> AsyncIterator:
+async def running_app(
+    make_cfg, oidc_url: str, monkeypatch, tmp_path, *, auth=None
+) -> AsyncIterator:
     # Keep FastMCP's encrypted OAuth state inside the test's temporary directory.
     monkeypatch.setenv("FASTMCP_HOME", str(tmp_path / "fastmcp"))
     base = make_cfg()
