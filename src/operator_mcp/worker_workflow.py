@@ -634,16 +634,24 @@ def _agent_settings_from_profile(
         if profile.get(key) is not None:
             settings[key] = profile[key]
     command = profile.get("acp_command")
-    if isinstance(command, str) and command.strip():
-        try:
-            settings["acp_command"] = shlex.split(command)
-        except ValueError:
-            raise WorkerError("the profile ACP command is not parseable") from None
-    elif isinstance(command, list) and all(isinstance(item, str) for item in command):
-        settings["acp_command"] = list(command)
+    if command is not None:
+        if isinstance(command, str) and command.strip():
+            try:
+                settings["acp_command"] = shlex.split(command)
+            except ValueError:
+                raise WorkerError("the profile ACP command is not parseable") from None
+        elif isinstance(command, list) and all(isinstance(item, str) and item for item in command):
+            settings["acp_command"] = list(command)
+        else:
+            raise WorkerError("the profile ACP command is invalid")
     arguments = profile.get("acp_args")
-    if isinstance(arguments, list) and all(isinstance(item, str) for item in arguments):
-        settings["acp_args"] = list(arguments)
+    if arguments is not None:
+        if isinstance(arguments, list) and all(
+            isinstance(item, str) and item for item in arguments
+        ):
+            settings["acp_args"] = list(arguments)
+        else:
+            raise WorkerError("the profile ACP arguments are invalid")
     for key in ("acp_isolate_data_dir", "acp_file_secrets"):
         if profile.get(key) is not None:
             settings[key] = profile[key]
