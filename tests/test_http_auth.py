@@ -78,12 +78,14 @@ def oidc_discovery_url() -> Iterator[str]:
 
 
 @asynccontextmanager
-async def running_app(make_cfg, oidc_url: str, monkeypatch, tmp_path) -> AsyncIterator:
+async def running_app(
+    make_cfg, oidc_url: str, monkeypatch, tmp_path, *, auth=None
+) -> AsyncIterator:
     # Keep FastMCP's encrypted OAuth state inside the test's temporary directory.
     monkeypatch.setenv("FASTMCP_HOME", str(tmp_path / "fastmcp"))
     base = make_cfg()
     cfg = replace(base, auth=replace(base.auth, oidc_config_url=oidc_url))
-    mcp = build_server(cfg, auth=build_auth(cfg))
+    mcp = build_server(cfg, auth=auth if auth is not None else build_auth(cfg))
     app = mcp.http_app(path="/mcp")
     async with app.lifespan(app):
         transport = httpx2.ASGITransport(app=app)
@@ -226,6 +228,141 @@ async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
         assert invalid_refresh not in unknown_client.text
         unauthenticated = await client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
         assert unauthenticated.status_code == 401
+
+
+async def test_issued_refresh_rotates_after_proxy_rebuild(
+    make_cfg, oidc_discovery_url, monkeypatch, tmp_path
+):
+    """Real proxy token exchanges; stub only upstream refresh transport.
+
+    Seed synthetic callback state rather than simulating browser consent.
+    This does not verify Authentik JWTs, process restart or ChatGPT link state.
+    """
+    import base64
+    import hashlib
+    import time
+    from unittest.mock import AsyncMock
+
+    from fastmcp.server.auth.oauth_proxy.models import ClientCode
+
+    base = make_cfg()
+    cfg = replace(base, auth=replace(base.auth, oidc_config_url=oidc_discovery_url))
+    redirect_uri = "https://chatgpt.com/connector_platform_oauth_redirect"
+    verifier = "v" * 43
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    )
+    scopes = ["openid", "profile"]
+    initial_upstream = {
+        "access_token": "synthetic-idp-access-1",
+        "refresh_token": "synthetic-idp-refresh-1",
+        "token_type": "Bearer",
+        "expires_in": 600,
+        "scope": "openid profile offline_access",
+    }
+
+    monkeypatch.setenv("FASTMCP_HOME", str(cfg.server.state_dir / "fastmcp"))
+    proxy = build_auth(cfg)
+    async with running_app(
+        make_cfg, oidc_discovery_url, monkeypatch, tmp_path, auth=proxy
+    ) as client:
+        registered = await client.post(
+            "/register",
+            json={
+                **DCR_BODY,
+                "grant_types": ["authorization_code", "refresh_token"],
+                "redirect_uris": [redirect_uri],
+                "scope": "openid profile offline_access",
+            },
+        )
+        assert registered.status_code in (200, 201)
+        client_id = registered.json()["client_id"]
+        # Mirror the callback record consumed by the pinned proxy (synthetic only).
+        code = ClientCode(
+            code="synthetic-callback-code",
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            code_challenge=challenge,
+            code_challenge_method="S256",
+            scopes=scopes,
+            idp_tokens=initial_upstream,
+            expires_at=time.time() + 300,
+            created_at=time.time(),
+        )
+        await proxy._code_store.put(key=code.code, value=code)
+        initial = await client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": client_id,
+                "redirect_uri": redirect_uri,
+                "code": code.code,
+                "code_verifier": verifier,
+            },
+        )
+        assert initial.status_code == 200
+        issued = initial.json()
+        assert issued["refresh_token"] != initial_upstream["refresh_token"]
+        assert issued["access_token"] != initial_upstream["access_token"]
+
+    rebuilt = build_auth(cfg)
+    assert rebuilt is not proxy
+    upstream = AsyncMock()
+    upstream.refresh_token.side_effect = [
+        {
+            **initial_upstream,
+            "access_token": "synthetic-idp-access-2",
+            "refresh_token": "synthetic-idp-refresh-2",
+        },
+        {
+            **initial_upstream,
+            "access_token": "synthetic-idp-access-3",
+            "refresh_token": "synthetic-idp-refresh-3",
+        },
+    ]
+
+    @asynccontextmanager
+    async def synthetic_upstream():
+        yield upstream
+
+    monkeypatch.setattr(rebuilt, "_upstream_oauth_client", synthetic_upstream)
+    form = {
+        "grant_type": "refresh_token",
+        "client_id": client_id,
+        "refresh_token": issued["refresh_token"],
+    }
+    async with running_app(
+        make_cfg, oidc_discovery_url, monkeypatch, tmp_path, auth=rebuilt
+    ) as client:
+        refreshed = await client.post("/token", data=form)
+        assert refreshed.status_code == 200
+        rotated = refreshed.json()
+        assert rotated["access_token"] != issued["access_token"]
+        assert rotated["refresh_token"] != issued["refresh_token"]
+        assert rotated["refresh_token"] != "synthetic-idp-refresh-2"
+        assert upstream.refresh_token.await_count == 1
+        assert (
+            upstream.refresh_token.await_args.kwargs["refresh_token"]
+            == initial_upstream["refresh_token"]
+        )
+
+        replay = await client.post("/token", data=form)
+        assert replay.status_code == 401
+        assert replay.json()["error"] == "invalid_grant"
+        assert "access_token" not in replay.json()
+        assert upstream.refresh_token.await_count == 1
+
+        # The new proxy refresh token must use the rotated upstream credential.
+        again = await client.post(
+            "/token", data={**form, "refresh_token": rotated["refresh_token"]}
+        )
+        assert again.status_code == 200
+        assert upstream.refresh_token.await_count == 2
+        assert (
+            upstream.refresh_token.await_args.kwargs["refresh_token"] == "synthetic-idp-refresh-2"
+        )
+        assert again.json()["refresh_token"] != rotated["refresh_token"]
+        assert again.json()["refresh_token"] != "synthetic-idp-refresh-3"
 
 
 async def test_garbage_bearer_token_is_rejected(
