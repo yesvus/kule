@@ -70,7 +70,10 @@ _ALLOWED_REQUEST_HEADERS = frozenset(
 )
 # Only lifecycle metadata is returned. ConversationInfo also carries the secret
 # registry, hook definitions, agent settings, arbitrary agent state and a
-# remote workspace API key; none of those leave the gateway.
+# remote workspace API key; none of those leave the gateway. Relationship IDs
+# (parent, fork, child, leaf event) are also dropped: Canvas does not check the
+# referenced conversation's repository tag, so returning them would disclose an
+# ID that a direct read of that conversation would deny.
 _SAFE_CONVERSATION_FIELDS = frozenset(
     {
         "id",
@@ -88,11 +91,6 @@ _SAFE_CONVERSATION_FIELDS = frozenset(
         "current_effort",
         "available_efforts",
         "supports_runtime_model_switch",
-        "parent_conversation_id",
-        "sub_conversation_ids",
-        "forked_from_conversation_id",
-        "forked_from_event_id",
-        "leaf_event_id",
         "metrics",
     }
 )
@@ -489,12 +487,15 @@ def _component(route: Any, component: Any) -> None:
     # Repository scope is a Kule target-authorization parameter. It is not sent
     # upstream; the guard removes it and enforces the native kulerepo tag.
     properties = component.parameters.setdefault("properties", {})
-    if endpoint.tool == "list_conversations" and isinstance(properties.get("page_id"), dict):
-        properties["page_id"]["maxLength"] = 256
-        properties["page_id"]["description"] = (
-            "Gateway continuation cursor from the previous next_page_id; "
-            "never a native Canvas conversation ID."
-        )
+    if endpoint.tool == "list_conversations":
+        if isinstance(properties.get("page_id"), dict):
+            properties["page_id"]["maxLength"] = 256
+            properties["page_id"]["description"] = (
+                "Gateway continuation cursor from the previous next_page_id; "
+                "never a native Canvas conversation ID."
+            )
+        if isinstance(properties.get("sort_order"), dict):
+            properties["sort_order"]["enum"] = ["CREATED_AT", "CREATED_AT_DESC"]
     properties["repository"] = {
         "type": "string",
         "pattern": _REPOSITORY.pattern,
@@ -635,7 +636,10 @@ def _encode_cursor(conversation_id: str, key: bytes) -> str:
     was filtered out of the page, and any tampering is denied.
     """
     nonce = os.urandom(_CURSOR_NONCE_BYTES)
-    raw = uuid.UUID(conversation_id).bytes
+    try:
+        raw = uuid.UUID(conversation_id).bytes
+    except (ValueError, AttributeError):
+        raise AuthorizationError("OpenHands pagination is not permitted") from None
     sealed = bytes(
         left ^ right for left, right in zip(raw, _cursor_stream(key, nonce, len(raw)), strict=True)
     )
@@ -802,9 +806,24 @@ class _TargetGuard(Middleware):
         elif name == "list_conversations":
             repository = self._repository(arguments.pop("repository", None))
             self._pagination(arguments)
+            sort_order = arguments.get("sort_order")
+            # A continuation anchored on a conversation ID is only stable while
+            # the ordering key is immutable. Reject updated-time order instead
+            # of silently skipping sessions that move after a rename.
+            if sort_order is not None and sort_order not in {"CREATED_AT", "CREATED_AT_DESC"}:
+                raise AuthorizationError("OpenHands sort order is not permitted")
             if arguments.get("page_id") is not None:
                 cursor_native = _decode_cursor(arguments["page_id"], self.cursor_key)
-                arguments["page_id"] = cursor_native
+                # Canvas matches page_id against UUID.hex, not the hyphenated
+                # UUID string it returns in conversation records.
+                arguments["page_id"] = uuid.UUID(cursor_native).hex
+            else:
+                arguments.pop("page_id", None)
+            # An explicit null filter is not a Canvas enum value. Drop it here as
+            # well as in _page so the first request matches follow-up pages.
+            for nullable in ("status", "sort_order"):
+                if arguments.get(nullable) is None:
+                    arguments.pop(nullable, None)
         elif name == "send_message":
             repository, conversation_id = self._scope(
                 arguments, {"repository", "conversation_id", "content", "run"}
@@ -886,18 +905,16 @@ class _TargetGuard(Middleware):
 
         Canvas ``next_page_id`` is the next global conversation UUID, which may
         belong to another repository. Returning it would disclose an excluded
-        conversation ID, so continuation uses an encrypted, authenticated
-        gateway token that encodes a native page position. When no session
-        matched within the page bound, the token anchors on the last scanned
-        position so the scan remains resumable instead of silently ending.
+        conversation ID, so continuation seals that native position in an
+        encrypted, authenticated cursor. Canvas treats ``page_id`` as an
+        inclusive start, so the next call begins at the first unscanned
+        conversation and never rebuilds the position from a returned item that
+        could move in the sort order.
         """
         items: list[dict[str, Any]] = []
-        last_scanned: str | None = None
-        last_returned: str | None = None
         next_native: str | None = None
         pages = 0
         truncated = False
-        skip = cursor_native
 
         while True:
             data = result.structured_content
@@ -908,38 +925,24 @@ class _TargetGuard(Middleware):
             ):
                 raise AuthorizationError("OpenHands conversation list is invalid")
             next_native = data.get("next_page_id")
-            if pages == 0 and skip is not None:
+            if pages == 0 and cursor_native is not None:
                 first = data["items"][0] if data["items"] else None
-                if not isinstance(first, dict) or first.get("id") != skip:
+                if not isinstance(first, dict) or first.get("id") != cursor_native:
                     raise AuthorizationError("OpenHands pagination cursor is stale")
             for item in data["items"]:
                 if not isinstance(item, dict):
                     continue
                 conversation = _safe_conversation(item)
-                conversation_id = conversation["id"]
-                last_scanned = conversation_id
-                if skip is not None:
-                    if conversation_id == skip:
-                        skip = None
-                    continue
                 tags = conversation.get("tags")
                 if isinstance(tags, dict) and tags.get("kulerepo") == repository:
                     items.append(conversation)
-                    last_returned = conversation_id
             pages += 1
             if items or next_native is None or pages >= _MAX_LIST_PAGES:
                 truncated = not items and next_native is not None
                 break
             result = await self._page(next_native, arguments)
 
-        cursor = None
-        if last_returned is not None and (last_returned != last_scanned or next_native is not None):
-            cursor = _encode_cursor(last_returned, self.cursor_key)
-        elif truncated and last_scanned is not None:
-            # The bounded scan saw no match. Resume from the last scanned
-            # position (Canvas treats page_id as an inclusive start) so the
-            # next call does not restart and cannot silently stop.
-            cursor = _encode_cursor(last_scanned, self.cursor_key)
+        cursor = None if next_native is None else _encode_cursor(next_native, self.cursor_key)
         data = {"items": items, "next_page_id": cursor}
         if truncated:
             data["truncated"] = True
@@ -947,7 +950,9 @@ class _TargetGuard(Middleware):
 
     async def _page(self, page_id: str, arguments: dict[str, Any]) -> ToolResult:
         params = {
-            name: arguments[name] for name in ("limit", "status", "sort_order") if name in arguments
+            name: arguments[name]
+            for name in ("limit", "status", "sort_order")
+            if arguments.get(name) is not None
         }
         params["page_id"] = page_id
         try:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import httpx2
@@ -234,6 +235,7 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
     assert listed["required"] == ["repository"]
     assert listed["properties"]["page_id"]["maxLength"] == 256
     assert "Gateway continuation cursor" in listed["properties"]["page_id"]["description"]
+    assert listed["properties"]["sort_order"]["enum"] == ["CREATED_AT", "CREATED_AT_DESC"]
     assert "repository" in tools["oh_run_conversation"].input_schema["required"]
     rename = tools["oh_rename_conversation"].input_schema
     assert set(rename["properties"]) == {"repository", "conversation_id", "title"}
@@ -426,7 +428,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                         },
                         {"id": LEGACY, "execution_status": "finished"},
                     ],
-                    "next_page_id": "next-page",
+                    "next_page_id": uuid.UUID(SECOND_CONVERSATION).hex,
                 },
             )
         if request.url.path == "/api/conversations":
@@ -455,7 +457,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
             assert [item["id"] for item in listed.data["items"]] == [CONVERSATION]
             cursor = listed.data["next_page_id"]
             assert cursor.startswith("gc1.")
-            assert "next-page" not in cursor
+            assert SECOND_CONVERSATION not in cursor
             assert OTHER_CONVERSATION not in cursor
             assert LEGACY not in cursor
             started = await caller.call_tool(
@@ -520,6 +522,33 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
     assert start["args"]["initial_message"]["valid"] is True
     assert start["args"]["initial_message"]["sha256"]
     assert start["args"]["working_dir"] == "/workspace/src/kule"
+
+
+async def test_rate_limited_run_surfaces_the_fastmcp_retry_error(gateway):
+    mcp, _, _ = gateway
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == f"/api/conversations/{CONVERSATION}":
+            return httpx2.Response(200, json={"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}})
+        if request.url.path == f"/api/conversations/{CONVERSATION}/events":
+            return httpx2.Response(429, json={"detail": "too many requests"})
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            with pytest.raises(ToolError, match="Rate limited by upstream API"):
+                await caller.call_tool(
+                    "oh_send_message",
+                    {
+                        "repository": REPOSITORY,
+                        "conversation_id": CONVERSATION,
+                        "content": [{"type": "text", "text": "start"}],
+                        "run": True,
+                    },
+                )
 
 
 async def test_direct_id_actions_require_matching_native_repository_tag(gateway):
@@ -623,6 +652,11 @@ def _full_conversation(conversation_id: str) -> dict:
             "agent_profile_id": PROFILE,
             "secret_refs": ["SECRET-REF"],
         },
+        "parent_conversation_id": "PARENT-CONVERSATION-SECRET",
+        "sub_conversation_ids": ["CHILD-CONVERSATION-SECRET"],
+        "forked_from_conversation_id": "FORK-CONVERSATION-SECRET",
+        "forked_from_event_id": "FORK-EVENT-SECRET",
+        "leaf_event_id": "LEAF-EVENT-SECRET",
         "available_models": [
             {"model_id": "model", "name": "Model", "description": "desc", "extra": "MODEL-SECRET"}
         ],
@@ -698,6 +732,11 @@ async def test_conversation_responses_are_projected_to_lifecycle_fields(gateway)
             "SECRET-REF",
             "MODEL-SECRET",
             "METRIC-SECRET",
+            "PARENT-CONVERSATION-SECRET",
+            "CHILD-CONVERSATION-SECRET",
+            "FORK-CONVERSATION-SECRET",
+            "FORK-EVENT-SECRET",
+            "LEAF-EVENT-SECRET",
         ):
             assert secret not in rendered
 
@@ -716,15 +755,15 @@ async def test_listing_cursor_never_exposes_an_excluded_conversation(gateway):
                     json={
                         "items": [{"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}}],
                         # Canvas points at an excluded conversation.
-                        "next_page_id": OTHER_CONVERSATION,
+                        "next_page_id": uuid.UUID(OTHER_CONVERSATION).hex,
                     },
                 )
-            assert page == CONVERSATION
+            assert page == uuid.UUID(OTHER_CONVERSATION).hex
             return httpx2.Response(
                 200,
                 json={
                     "items": [
-                        {"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}},
+                        {"id": OTHER_CONVERSATION, "tags": {"kulerepo": OTHER_REPOSITORY}},
                         {"id": SECOND_CONVERSATION, "tags": {"kulerepo": REPOSITORY}},
                     ],
                     "next_page_id": None,
@@ -769,14 +808,15 @@ async def test_stale_listing_cursor_fails_closed(gateway):
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == "/api/conversations/search":
             page = request.url.params.get("page_id")
+            if page is not None:
+                assert page == uuid.UUID(page).hex
             if page is None:
-                items = [
-                    {"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}},
-                    {"id": OTHER_CONVERSATION, "tags": {"kulerepo": OTHER_REPOSITORY}},
-                ]
+                items = [{"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}}]
+                next_page_id = uuid.UUID(SECOND_CONVERSATION).hex
             else:
-                items = [{"id": SECOND_CONVERSATION, "tags": {"kulerepo": REPOSITORY}}]
-            return httpx2.Response(200, json={"items": items, "next_page_id": None})
+                items = [{"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}}]
+                next_page_id = None
+            return httpx2.Response(200, json={"items": items, "next_page_id": next_page_id})
         return httpx2.Response(200, json={"ok": True})
 
     async with httpx2.AsyncClient(
@@ -790,6 +830,71 @@ async def test_stale_listing_cursor_fails_closed(gateway):
                     "oh_list_conversations",
                     {"repository": REPOSITORY, "page_id": first.data["next_page_id"]},
                 )
+
+
+async def test_list_first_request_omits_null_status(gateway):
+    mcp, _, _ = gateway
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.update(dict(request.url.params))
+        return httpx2.Response(200, json={"items": [], "next_page_id": None})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            await caller.call_tool(
+                "oh_list_conversations",
+                {"repository": REPOSITORY, "status": None},
+            )
+
+    assert "status" not in seen
+
+
+async def test_follow_up_list_requests_omit_null_filters():
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        seen.update(dict(request.url.params))
+        return httpx2.Response(200, json={"items": [], "next_page_id": None})
+
+    client = httpx2.AsyncClient(base_url=ORIGIN, transport=httpx2.MockTransport(handler))
+    guard = openhands._TargetGuard(client, {REPOSITORY: "/workspace/src/kule"}, b"key")
+    try:
+        await guard._page(
+            "abc123",
+            {"status": None, "limit": 5, "sort_order": "CREATED_AT_DESC"},
+        )
+    finally:
+        await client.aclose()
+
+    assert "status" not in seen
+    assert seen["limit"] == "5"
+    assert seen["sort_order"] == "CREATED_AT_DESC"
+    assert seen["page_id"] == "abc123"
+
+
+async def test_list_guard_rejects_unstable_sort_order():
+    guard = openhands._TargetGuard(
+        None,  # type: ignore[arg-type]
+        {REPOSITORY: "/workspace/src/kule"},
+        b"key",
+    )
+
+    class _Message:
+        name = "list_conversations"
+        arguments = {"repository": REPOSITORY, "sort_order": "UPDATED_AT"}
+
+    class _Context:
+        message = _Message()
+
+    async def _unreachable(_context):
+        raise AssertionError("the upstream request must not run")
+
+    with pytest.raises(AuthorizationError, match="sort order"):
+        await guard.on_call_tool(_Context(), _unreachable)
 
 
 def test_launch_checkout_is_bound_to_the_approved_repository_mapping():
@@ -817,29 +922,32 @@ async def test_truncated_listing_returns_a_resumable_opaque_cursor(gateway):
     def handler(request: httpx2.Request) -> httpx2.Response:
         requests.append(request)
         page = request.url.params.get("page_id")
-        if page is None:
+        if page is not None:
+            assert page == uuid.UUID(page).hex
+        page_id = str(uuid.UUID(page)) if page is not None else None
+        if page_id is None:
             return httpx2.Response(
                 200,
                 json={
                     "items": [{"id": excluded[0]}],
-                    "next_page_id": excluded[1],
+                    "next_page_id": uuid.UUID(excluded[1]).hex,
                 },
             )
-        if page in excluded:
-            index = excluded.index(page)
+        if page_id in excluded:
+            index = excluded.index(page_id)
             if index < len(excluded) - 1:
                 return httpx2.Response(
                     200,
                     json={
-                        "items": [{"id": page}],
-                        "next_page_id": excluded[index + 1],
+                        "items": [{"id": page_id}],
+                        "next_page_id": uuid.UUID(excluded[index + 1]).hex,
                     },
                 )
             return httpx2.Response(
                 200,
                 json={
                     "items": [
-                        {"id": page},
+                        {"id": page_id},
                         {"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}},
                     ],
                     "next_page_id": None,
@@ -867,7 +975,7 @@ async def test_truncated_listing_returns_a_resumable_opaque_cursor(gateway):
             assert second.data["next_page_id"] is None
             assert "truncated" not in second.data
 
-    assert len(requests) == 7
+    assert len(requests) == 6
 
 
 async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway):
@@ -879,6 +987,8 @@ async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway)
         if request.url.path == f"/api/conversations/{CONVERSATION}":
             return httpx2.Response(200, json={"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}})
         if request.url.path == f"/api/conversations/{CONVERSATION}/events/search":
+            sort_order = request.url.params.get("sort_order")
+            assert sort_order in (None, "TIMESTAMP", "TIMESTAMP_DESC")
             return httpx2.Response(200, json={"items": [], "next_page_id": None})
         return httpx2.Response(200, json={"ok": True})
 
@@ -895,7 +1005,7 @@ async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway)
                     "limit": 10,
                     "page_id": "event-page",
                     "kind": "MessageEvent",
-                    "sort_order": "timestamp",
+                    "sort_order": "TIMESTAMP",
                 },
             )
             with pytest.raises(ToolError, match="pagination is not permitted"):
@@ -912,7 +1022,7 @@ async def test_event_search_passes_bounded_filters_for_a_scoped_session(gateway)
     assert search.url.params["limit"] == "10"
     assert search.url.params["page_id"] == "event-page"
     assert search.url.params["kind"] == "MessageEvent"
-    assert search.url.params["sort_order"] == "timestamp"
+    assert search.url.params["sort_order"] == "TIMESTAMP"
     assert "repository" not in search.url.params
 
 
