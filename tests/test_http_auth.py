@@ -249,9 +249,9 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
     cfg = replace(base, auth=replace(base.auth, oidc_config_url=oidc_discovery_url))
     redirect_uri = "https://chatgpt.com/connector_platform_oauth_redirect"
     verifier = "v" * 43
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).decode().rstrip("=")
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    )
     scopes = ["openid", "profile"]
     initial_upstream = {
         "access_token": "synthetic-idp-access-1",
@@ -358,8 +358,7 @@ async def test_issued_refresh_rotates_after_proxy_rebuild(
         assert again.status_code == 200
         assert upstream.refresh_token.await_count == 2
         assert (
-            upstream.refresh_token.await_args.kwargs["refresh_token"]
-            == "synthetic-idp-refresh-2"
+            upstream.refresh_token.await_args.kwargs["refresh_token"] == "synthetic-idp-refresh-2"
         )
         assert again.json()["refresh_token"] != rotated["refresh_token"]
         assert again.json()["refresh_token"] != "synthetic-idp-refresh-3"
