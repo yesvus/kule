@@ -97,6 +97,7 @@ developer_group = "mcp-developers"      # new developer identity
 [tools]
 workspace_enabled = false              # leave disabled until #731 and targeted Pod RBAC
 developer_enabled = false              # extra gate for non-operator workspace access
+developer_isolation_verified = false   # shared-HOME/credential isolation gate
 developer_isolation_verified = false   # hard gate for the shared-UID/HOME boundary
 ```
 
