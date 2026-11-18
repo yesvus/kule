@@ -215,6 +215,15 @@ async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
         assert denied.json()["error"] == "invalid_grant"
         assert "access_token" not in denied.json()
         assert invalid_refresh not in denied.text
+        # A never-registered client must fail at client authentication, not
+        # be mistaken for a registered client with an invalid refresh grant.
+        unknown_client = await client.post(
+            "/token", data={**form, "client_id": "synthetic-unregistered-client"}
+        )
+        assert unknown_client.status_code == 401
+        assert unknown_client.json()["error"] == "invalid_client"
+        assert "access_token" not in unknown_client.json()
+        assert invalid_refresh not in unknown_client.text
         unauthenticated = await client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
         assert unauthenticated.status_code == 401
 
