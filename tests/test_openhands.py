@@ -647,9 +647,10 @@ async def test_effort_switch_is_scoped_and_validated(gateway):
     ) as client:
         openhands.mount(mcp, client=client)
         async with Client(mcp) as caller:
-            with pytest.raises(ToolError, match="effort identifier"):
-                await caller.call_tool("oh_switch_acp_effort", {**args, "effort": "bad effort"})
-            _assert_no_request(requests)
+            for invalid in ("bad effort", "", "a" * 65, "-high", ".high"):
+                with pytest.raises(ToolError, match="effort identifier"):
+                    await caller.call_tool("oh_switch_acp_effort", {**args, "effort": invalid})
+                _assert_no_request(requests)
             with pytest.raises(ToolError, match="outside the requested repository"):
                 await caller.call_tool(
                     "oh_switch_acp_effort", {**args, "conversation_id": OTHER_CONVERSATION}
