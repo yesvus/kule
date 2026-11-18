@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from contextlib import suppress
 from pathlib import Path
 
 from fastmcp import FastMCP
@@ -88,8 +89,9 @@ async def _run(script: bytes, seconds: int, max_bytes: int) -> dict:
             code = await proc.wait()
     finally:
         if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+            with suppress(ProcessLookupError):
+                proc.kill()
+            await proc.communicate()
     return {
         "host": "gurbet",
         "returncode": code,
@@ -125,5 +127,5 @@ def register(mcp: FastMCP, cfg: Config) -> None:
             raise ValueError("invalid script size or encoding")
         seconds = min(90, int(cfg.tools.timeout_seconds) - 10)
         # FastMCP serializes both structured and text results. Leave headroom.
-        cap = min(16384, max(128, cfg.tools.max_output_bytes // 16))
+        cap = min(4096, max(128, cfg.tools.max_output_bytes // 16))
         return await _run(raw, seconds, cap)
