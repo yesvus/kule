@@ -5,7 +5,7 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from helpers import OPERATOR, OUTSIDER
 
-from operator_mcp.audit import verify
+from operator_mcp.audit import AuditLog, verify
 from operator_mcp.server import build_server
 
 
@@ -56,6 +56,29 @@ async def test_kill_switch_blocks_operator(server, claims):
         with pytest.raises(ToolError, match="kill switch"):
             await client.call_tool("whoami", {})
     assert audit_events(cfg)[-1]["reason"] == "kill switch"
+
+
+async def test_kill_switch_activated_during_audit_blocks_dispatch(server, claims, monkeypatch):
+    cfg, mcp = server
+    claims.value = OPERATOR
+    original_write = AuditLog.write
+
+    def activate_after_call_audit(self, event, **fields):
+        original_write(self, event, **fields)
+        if event == "call":
+            cfg.kill_switch_path.touch()
+
+    monkeypatch.setattr(AuditLog, "write", activate_after_call_audit)
+    async with Client(mcp) as client:
+        with pytest.raises(ToolError, match="kill switch"):
+            await client.call_tool("note_write", {"name": "blocked", "text": "x"})
+
+    assert not (cfg.tools.scratch_dir / "blocked.txt").exists()
+    events = audit_events(cfg)
+    assert [e["event"] for e in events] == ["call", "denied"]
+    assert events[-1]["reason"] == "kill switch"
+    assert events[0]["call_id"] == events[1]["call_id"]
+    assert verify(cfg.audit.path) == (True, 2)
 
 
 async def test_note_write_rejects_path_tricks(server, claims):

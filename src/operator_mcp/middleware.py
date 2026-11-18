@@ -249,6 +249,12 @@ class OperatorMiddleware(Middleware):
             )
             raise AuthorizationError("not authorized")
 
+        # A kill-switch activation during asynchronous lookup/auditing must
+        # also stop the pending call. Already dispatched calls are not cancelled.
+        if self.kill_switch.exists():
+            await self._audit("denied", reason="kill switch", args=audit_args, **who)
+            raise AuthorizationError("operator-mcp is disabled by the kill switch")
+
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already
         # running in a worker thread cannot be interrupted; host tools must
