@@ -171,6 +171,53 @@ async def test_registration_accepts_chatgpt_redirect_uri(
     assert resp.json()["client_id"]
 
 
+async def test_refresh_grant_registration_and_invalid_token_after_rebuild(
+    make_cfg, oidc_discovery_url, monkeypatch, tmp_path
+):
+    """Exercise real token endpoint without contacting a production IdP.
+
+    This proves refresh grant advertisement, client registration and rejection
+    of an unknown refresh token across an app rebuild, not successful refresh
+    of an issued token or persistence across a new process.
+    """
+    redirect_uri = "https://chatgpt.com/connector_platform_oauth_redirect"
+    invalid_refresh = "synthetic-invalid-refresh-token"
+    body = {
+        **DCR_BODY,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "redirect_uris": [redirect_uri],
+    }
+    async with running_app(make_cfg, oidc_discovery_url, monkeypatch, tmp_path) as client:
+        metadata = await client.get("/.well-known/oauth-authorization-server")
+        assert metadata.status_code == 200
+        assert "refresh_token" in metadata.json()["grant_types_supported"]
+        registration = await client.post("/register", json=body)
+        assert registration.status_code in (200, 201)
+        registered = registration.json()
+        assert "refresh_token" in registered["grant_types"]
+        form = {
+            "grant_type": "refresh_token",
+            "client_id": registered["client_id"],
+            "refresh_token": invalid_refresh,
+        }
+        denied = await client.post("/token", data=form)
+        assert denied.status_code == 400
+        assert denied.json()["error"] == "invalid_grant"
+        assert "access_token" not in denied.json()
+        assert invalid_refresh not in denied.text
+
+    # Reconstruct the real proxy with the same state path and signing key.
+    # Do not re-register the client: a lost registration must fail this test.
+    async with running_app(make_cfg, oidc_discovery_url, monkeypatch, tmp_path) as client:
+        denied = await client.post("/token", data=form)
+        assert denied.status_code == 400
+        assert denied.json()["error"] == "invalid_grant"
+        assert "access_token" not in denied.json()
+        assert invalid_refresh not in denied.text
+        unauthenticated = await client.post("/mcp", json=INITIALIZE, headers=MCP_HEADERS)
+        assert unauthenticated.status_code == 401
+
+
 async def test_garbage_bearer_token_is_rejected(
     make_cfg, oidc_discovery_url, monkeypatch, tmp_path
 ):
