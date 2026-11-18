@@ -186,6 +186,7 @@ class WorkerTask:
         if self.expected_acp_server not in {"opencode", "codex", "claude-code", "custom"}:
             raise WorkerError("expected_acp_server is not a supported ACP profile")
         _validate_branch_prefix(self.branch_prefix)
+        _validate_git_ref(self.branch)
         if not isinstance(self.max_iterations, int) or isinstance(self.max_iterations, bool):
             raise WorkerError("max_iterations must be an integer")
         if not 1 <= self.max_iterations <= 1000:
@@ -452,7 +453,7 @@ def map_status(raw: str) -> str:
 def _validate_branch_prefix(prefix: str) -> None:
     if not isinstance(prefix, str) or len(prefix) > 200:
         raise WorkerError("branch_prefix is invalid")
-    if not _BRANCH_PREFIX_RE.fullmatch(prefix) or prefix == "":
+    if not _BRANCH_PREFIX_RE.fullmatch(prefix) or prefix == "" or ".." in prefix or "@{" in prefix:
         raise WorkerError("branch_prefix is not a safe git branch prefix")
     parts = prefix.split("/")
     for index, part in enumerate(parts):
@@ -461,8 +462,28 @@ def _validate_branch_prefix(prefix: str) -> None:
             if index == len(parts) - 1 and prefix.endswith("/"):
                 continue
             raise WorkerError("branch_prefix is not a safe git branch prefix")
-        if part in {".", ".."} or part.endswith(".lock") or part.endswith("."):
+        if part.startswith(".") or part.endswith(".lock") or part.endswith("."):
             raise WorkerError("branch_prefix is not a safe git branch prefix")
+
+
+def _validate_git_ref(ref: str) -> None:
+    """Apply Git's ref-name rules to the complete prefix+conversation branch."""
+    if (
+        not isinstance(ref, str)
+        or not ref
+        or len(ref) > 255
+        or not _MODEL_RE.fullmatch(ref)
+        or ref.startswith("/")
+        or ref.endswith("/")
+        or "//" in ref
+        or ".." in ref
+        or "@{" in ref
+        or ref == "@"
+    ):
+        raise WorkerError("branch is not a valid git ref")
+    for part in ref.split("/"):
+        if not part or part.startswith(".") or part.endswith(".lock") or part.endswith("."):
+            raise WorkerError("branch is not a valid git ref")
 
 
 def _validate_secrets(secrets: Mapping[str, Mapping[str, Any]]) -> None:
@@ -867,6 +888,16 @@ class WorkerClient:
                     raise WorkerHTTPError(status_code)
                 if not 200 <= status_code < 300:
                     raise WorkerHTTPError(status_code)
+                length = response.headers.get("content-length")
+                if length is not None:
+                    try:
+                        declared = int(length)
+                    except ValueError:
+                        raise WorkerResponseError(
+                            status_code, "OpenHands returned an invalid content length"
+                        ) from None
+                    if declared > _MAX_RESPONSE_BYTES:
+                        raise WorkerResponseError(status_code, "OpenHands response too large")
                 content = bytearray()
                 async for chunk in response.aiter_bytes():
                     content.extend(chunk)
@@ -1015,82 +1046,104 @@ class WorkerClient:
         repo_path = self._repo_path(task.repository)
         preflight = await self.preflight(task)
         body = build_start_request(task, repo_path, preflight)
-        request_started = False
         try:
             # Same-ID creates are serialized client-side. Upstream's lifecycle
             # lock is taken after worktree creation, so two concurrent creates
-            # can race the force-remove step. Take this lock before the start
-            # slot so a same-ID waiter does not consume admission capacity.
+            # can race the force-remove step. This lock also serializes task
+            # submission and run retries with stop() for the same id.
             async with self._start_lock(task.conversation_id):
                 async with self._start_slots:
-                    request_started = True
                     status, info = await self._request(
                         "POST",
                         "/api/conversations",
                         body=body,
                         timeout=task.timeout_seconds,
                     )
-                    request_started = False
+                if status not in (200, 201):
+                    raise WorkerError(f"unexpected OpenHands start status {status}")
+
+                if status == 200:
+                    # An existing conversation is never sent a second task.
+                    legacy = self._validate_common(task, info, repo_path=repo_path)
+                    if legacy:
+                        raise WorkerError("a legacy conversation cannot be reused for dispatch")
+                    accepted = await self._task_accepted(task.conversation_id)
+                    dispatch = self._dispatch(task, info, created=False)
+                    if accepted is False:
+                        if dispatch.raw_status != "idle":
+                            raise WorkerError("conversation exists without an accepted task")
+                        await self._submit_task(task)
+                        info = await self._await_effective(
+                            task,
+                            attempts=model_verify_attempts,
+                            interval=model_verify_interval,
+                        )
+                        self._validate_common(task, info, repo_path=repo_path)
+                        dispatch = self._dispatch(task, info, created=False)
+                    elif accepted is True and dispatch.raw_status == "idle":
+                        # The task was saved but the run slot was not admitted.
+                        await self._run_with_retry(task)
+                        info = await self._await_effective(
+                            task,
+                            attempts=model_verify_attempts,
+                            interval=model_verify_interval,
+                        )
+                        self._validate_common(task, info, repo_path=repo_path)
+                        dispatch = self._dispatch(task, info, created=False)
+                    elif accepted is None and dispatch.raw_status == "idle":
+                        raise WorkerError("the saved task state is unknown")
+                    if branch_reader is not None:
+                        await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
+                        dispatch = replace(dispatch, branch_verified=True)
+                    if not dispatch.model_verified:
+                        raise WorkerError(
+                            "the existing conversation has no matching effective model"
+                        )
+                    if task.expected_effort is not None and not dispatch.effort_verified:
+                        raise WorkerError(
+                            "the existing conversation has no matching effective effort"
+                        )
+                    return dispatch
+
+                try:
+                    self._validate_common(task, info, repo_path=repo_path)
+                    branch_verified = False
+                    if branch_reader is not None:
+                        await self._verify_branch(branch_reader, self._workspace(info), task.branch)
+                        branch_verified = True
+                    await self._select_model_effort(task, preflight)
+                    await self._submit_task(task)
+                    info = await self._await_effective(
+                        task,
+                        attempts=model_verify_attempts,
+                        interval=model_verify_interval,
+                    )
+                    self._validate_common(task, info, repo_path=repo_path)
+                    dispatch = self._dispatch(task, info, created=True)
+                    if branch_verified:
+                        dispatch = replace(dispatch, branch_verified=True)
+                    return dispatch
+                except asyncio.CancelledError:
+                    # This request received HTTP 201, so it owns the worker.
+                    await self._safe_interrupt_shielded(task.conversation_id)
+                    raise
+                except WorkerError:
+                    await self._safe_interrupt(task.conversation_id)
+                    raise
         except _HTTPTimeout:
-            created = await self._reconcile_created(task, repo_path)
-            if created:
-                raise WorkerTimeout(
-                    "OpenHands start timed out after creating the conversation; it was interrupted",
-                    task.conversation_id,
-                ) from None
+            # Ownership is ambiguous after a lost create response. Return the
+            # id for inspection rather than interrupting a possibly reused
+            # conversation.
             raise WorkerTimeout(
                 "OpenHands start timed out; query the conversation before retrying",
                 task.conversation_id,
             ) from None
         except asyncio.CancelledError:
-            if request_started:
-                reconcile = asyncio.create_task(self._reconcile_created(task, repo_path))
-                try:
-                    await asyncio.shield(reconcile)
-                except BaseException:  # noqa: S110 - cancellation is preserved
-                    pass
             raise
         except WorkerResponseError as exc:
             if exc.status_code == 201:
                 await self._safe_interrupt(task.conversation_id)
             raise
-        except WorkerError:
-            if request_started:
-                await self._reconcile_created(task, repo_path)
-            raise
-        if status not in (200, 201):
-            raise WorkerError(f"unexpected OpenHands start status {status}")
-
-        if status == 200:
-            # An existing conversation is never sent another task.
-            legacy = self._validate_common(task, info, repo_path=repo_path)
-            if legacy:
-                raise WorkerError("a legacy conversation cannot be reused for dispatch")
-            dispatch = self._dispatch(task, info, created=False)
-            if branch_reader is not None:
-                await self._verify_branch(branch_reader, dispatch.workspace, task.branch)
-                dispatch = self._with_branch_verified(dispatch)
-            if not dispatch.model_verified:
-                raise WorkerError("the existing conversation has no matching effective model")
-            if task.expected_effort is not None and not dispatch.effort_verified:
-                raise WorkerError("the existing conversation has no matching effective effort")
-            return dispatch
-
-        try:
-            self._validate_common(task, info, repo_path=repo_path)
-            if branch_reader is not None:
-                await self._verify_branch(branch_reader, self._workspace(info), task.branch)
-            await self._select_model_effort(task, preflight)
-            await self._submit_task(task)
-            info = await self._await_effective(
-                task, attempts=model_verify_attempts, interval=model_verify_interval
-            )
-            self._validate_common(task, info, repo_path=repo_path)
-            dispatch = self._dispatch(task, info, created=True)
-        except WorkerError:
-            await self._safe_interrupt(task.conversation_id)
-            raise
-        return dispatch
 
     async def status(
         self,
@@ -1297,19 +1350,20 @@ class WorkerClient:
 
     async def stop(self, task: WorkerTask, *, timeout: float = 20.0) -> WorkerStop:
         """Interrupt a scoped conversation and report its actual state."""
-        _, info = await self._request(
-            "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
-        )
-        self._validate_scope(task, info)
-        await self._interrupt_raw(task.conversation_id, timeout=timeout)
-        try:
-            _, current = await self._request(
+        async with self._start_lock(task.conversation_id):
+            _, info = await self._request(
                 "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
             )
-            raw = current.get("execution_status")
-            raw_status = raw if isinstance(raw, str) else "unknown"
-        except WorkerError:
-            raw_status = "unknown"
+            self._validate_scope(task, info)
+            await self._interrupt_raw(task.conversation_id, timeout=timeout)
+            try:
+                _, current = await self._request(
+                    "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
+                )
+                raw = current.get("execution_status")
+                raw_status = raw if isinstance(raw, str) else "unknown"
+            except WorkerError:
+                raw_status = "unknown"
         return WorkerStop(
             conversation_id=task.conversation_id,
             acknowledged=True,
@@ -1328,6 +1382,13 @@ class WorkerClient:
         try:
             await self._interrupt_raw(conversation_id)
         except WorkerError:
+            pass
+
+    async def _safe_interrupt_shielded(self, conversation_id: UUID) -> None:
+        interrupt = asyncio.create_task(self._safe_interrupt(conversation_id))
+        try:
+            await asyncio.shield(interrupt)
+        except BaseException:  # noqa: S110 - cancellation is preserved
             pass
 
     async def _select_model_effort(self, task: WorkerTask, preflight: ModelPreflight) -> None:
@@ -1359,6 +1420,9 @@ class WorkerClient:
             # 429 means the message was saved but no run slot was available.
             if exc.status_code != 429:
                 raise
+        await self._run_with_retry(task)
+
+    async def _run_with_retry(self, task: WorkerTask) -> None:
         for attempt in range(3):
             try:
                 await self._request(
@@ -1372,6 +1436,21 @@ class WorkerClient:
                     raise
                 await asyncio.sleep(0.25 * (attempt + 1))
 
+    async def _task_accepted(self, conversation_id: UUID) -> bool | None:
+        try:
+            _, page = await self._request(
+                "GET",
+                f"/api/conversations/{conversation_id}/events/search"
+                "?limit=1&kind=MessageEvent&source=user",
+                timeout=20.0,
+            )
+        except WorkerError:
+            return None
+        items = page.get("items")
+        if not isinstance(items, list):
+            return None
+        return bool(items)
+
     async def _await_effective(
         self, task: WorkerTask, *, attempts: int, interval: float
     ) -> dict[str, Any]:
@@ -1379,10 +1458,14 @@ class WorkerClient:
             _, info = await self._request(
                 "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
             )
+            raw_status = info.get("execution_status")
             effective_model = self._effective_model(info)
             effective_effort = self._effective_effort(info)
-            if effective_model == task.expected_model and (
-                task.expected_effort is None or effective_effort == task.expected_effort
+            if (
+                isinstance(raw_status, str)
+                and raw_status != "idle"
+                and effective_model == task.expected_model
+                and (task.expected_effort is None or effective_effort == task.expected_effort)
             ):
                 return info
             if effective_model is not None and effective_model != task.expected_model:
@@ -1396,27 +1479,6 @@ class WorkerClient:
             if attempt + 1 < attempts and interval:
                 await asyncio.sleep(interval)
         raise WorkerError("effective model/effort was not reported before the task")
-
-    async def _reconcile_created(self, task: WorkerTask, repo_path: str) -> bool | None:
-        try:
-            _, info = await self._request(
-                "GET", f"/api/conversations/{task.conversation_id}", timeout=20.0
-            )
-        except WorkerHTTPError as exc:
-            if exc.status_code == 404:
-                return False
-            return None
-        except WorkerError:
-            return None
-        try:
-            self._validate_common(task, info, repo_path=repo_path)
-        except WorkerError:
-            return None
-        try:
-            await self._interrupt_raw(task.conversation_id)
-        except WorkerError:
-            return None
-        return True
 
     async def _read_branch(
         self, reader: BranchReader, workspace: str

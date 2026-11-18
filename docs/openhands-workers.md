@@ -183,11 +183,12 @@ The result is bounded and repository-scoped. `unclassified_count` says how many 
 
 - **Start admission:** `WorkerClient(max_concurrent_starts=2)` admits at most two start POSTs at once. This is request admission only. It does not count running workers, bound total active conversations or provide a queue.
 - **Same id:** a per-conversation client lock serializes create attempts for one id while different ids proceed in parallel.
-- **Timeout:** the create POST uses `timeout_seconds`. On timeout, the client queries the client-generated id and interrupts only a conversation whose native identity matches this task. `WorkerTimeout` keeps the id for operator follow-up.
-- **Cancellation:** the caller's cancellation is preserved. If the POST was already in flight, a best-effort shielded reconciliation checks and interrupts only a worker this request created.
+- **Timeout:** the create POST uses `timeout_seconds`. A lost create response cannot prove whether this request created the worker, so `WorkerTimeout` returns the client-generated id for inspection and does **not** interrupt a possibly reused conversation.
+- **Cancellation:** the caller's cancellation is preserved. Cancellation during the create POST is ambiguous and does not interrupt; cancellation after a known HTTP 201 interrupts the worker this request created.
 - **201 body failure:** an invalid or oversized 201 body interrupts the newly created worker. An invalid/oversized 200 body never interrupts an existing conversation.
+- **Retry after a saved task:** a 200 reuse is not treated as a completed dispatch. If the conversation is idle and has no user message, the task is submitted once; if the task is saved but the run was never admitted, only `/run` is retried. A running/finished conversation is a no-op.
 - **429 on task submission:** the message is already saved; the client retries `POST /run` with bounded backoff instead of resending it.
-- **Cancel:** `stop(task)` checks repository scope, calls native `/interrupt`, then reads the actual state. It does not report `paused` from the acknowledgment alone and never calls `DELETE`.
+- **Cancel:** `stop(task)` checks repository scope under the same per-id lock as start, calls native `/interrupt`, then reads the actual state. It does not report `paused` from the acknowledgment alone and never calls `DELETE`.
 
 ## Cleanup protection
 

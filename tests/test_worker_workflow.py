@@ -152,6 +152,7 @@ class Server:
         self.event_status = 200
         self.run_status = 200
         self.final_status = 200
+        self.task_accepted = True
         self.search_pages: list[dict] = [
             {"items": [conversation(task_value)], "next_page_id": None}
         ]
@@ -201,6 +202,18 @@ class Server:
                     "error": self.discovery_error,
                 },
             )
+        if (
+            request.method == "GET"
+            and path.startswith("/api/conversations/")
+            and path.endswith("/events/search")
+        ):
+            return httpx2.Response(
+                200,
+                json={
+                    "items": [{"kind": "MessageEvent"}] if self.task_accepted else [],
+                    "next_page_id": None,
+                },
+            )
         if request.method == "GET" and path == "/api/conversations/search":
             params = parse_qs(query)
             page = int(params.get("page_id", ["0"])[0])
@@ -229,8 +242,18 @@ class Server:
             if len(parts) == 4 and parts[3] == "switch_acp_effort":
                 return httpx2.Response(200, json={"success": True})
             if len(parts) == 4 and parts[3] == "events":
+                if self.event_status == 200:
+                    self.conversation = {
+                        **self.conversation,
+                        "execution_status": "running",
+                    }
                 return httpx2.Response(self.event_status, json={"success": True})
             if len(parts) == 4 and parts[3] == "run":
+                if self.run_status == 200:
+                    self.conversation = {
+                        **self.conversation,
+                        "execution_status": "running",
+                    }
                 return httpx2.Response(self.run_status, json={"success": True})
             if len(parts) == 4 and parts[3] == "interrupt":
                 if self.conversation.get("execution_status") not in {
@@ -321,6 +344,10 @@ def test_task_requires_matching_issue_repo_and_canonical_identity():
         task(branch_prefix="oh23//worker/")
     with pytest.raises(WorkerError, match="branch_prefix"):
         task(branch_prefix="oh23/.lock/")
+    with pytest.raises(WorkerError, match="branch_prefix"):
+        task(branch_prefix="openhands/.worker/")
+    with pytest.raises(WorkerError, match="branch_prefix"):
+        task(branch_prefix="openhands/release..candidate/")
     with pytest.raises(WorkerError, match="secret values"):
         task(secrets={"name": "not-an-object"})
 
@@ -654,13 +681,27 @@ async def test_200_invalid_body_never_interrupts_existing_worker():
     )
 
 
-async def test_oversized_response_is_rejected_while_streaming():
+class _NeverReadStream(httpx2.AsyncByteStream):
+    def __init__(self) -> None:
+        self.iterated = False
+
+    async def __aiter__(self):
+        self.iterated = True
+        yield b"x"
+
+
+async def test_oversized_response_is_rejected_before_streaming():
     value = task()
     server = Server(value)
+    stream = _NeverReadStream()
 
     async def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == f"/api/conversations/{CONVERSATION_ID}":
-            return httpx2.Response(200, content=b"x" * (ww._MAX_RESPONSE_BYTES + 1))
+            return httpx2.Response(
+                200,
+                headers={"Content-Length": str(ww._MAX_RESPONSE_BYTES + 1)},
+                stream=stream,
+            )
         return await server.handler(request)
 
     async with WorkerClient(
@@ -671,6 +712,7 @@ async def test_oversized_response_is_rejected_while_streaming():
     ) as client:
         with pytest.raises(ww.WorkerResponseError, match="too large"):
             await client.status(value)
+    assert stream.iterated is False
 
 
 async def test_429_save_then_run_retry():
@@ -681,6 +723,34 @@ async def test_429_save_then_run_retry():
         result = await client.start(value)
     assert result.model_verified is True
     assert any(call[1] == f"/api/conversations/{CONVERSATION_ID}/run" for call in server.calls)
+
+
+async def test_duplicate_idle_without_saved_task_replays_once():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.task_accepted = False
+    server.conversation = conversation(value, execution_status="idle")
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.created is False
+    assert result.model_verified is True
+    events = [call for call in server.calls if call[1].endswith("/events")]
+    assert len(events) == 1
+
+
+async def test_duplicate_idle_with_saved_task_only_retries_run():
+    value = task()
+    server = Server(value)
+    server.start_status = 200
+    server.task_accepted = True
+    server.conversation = conversation(value, execution_status="idle")
+    async with client_for(server) as client:
+        result = await client.start(value)
+    assert result.created is False
+    assert result.model_verified is True
+    assert not any(call[1].endswith("/events") for call in server.calls)
+    assert any(call[1].endswith("/run") for call in server.calls)
 
 
 def test_status_mapping_is_total_and_explicit():
@@ -852,6 +922,18 @@ async def test_branch_reader_verifies_actual_worktree_branch():
     assert result.actual_branch == value.branch
     assert mismatch.branch_verified is False
     assert "does not match" in (mismatch.branch_error or "")
+
+
+async def test_start_branch_reader_match_sets_verified():
+    value = task()
+    server = Server(value)
+
+    async def good(_: str) -> str:
+        return value.branch
+
+    async with client_for(server) as client:
+        result = await client.start(value, branch_reader=good)
+    assert result.branch_verified is True
 
 
 async def test_start_branch_reader_mismatch_interrupts_created_worker():
@@ -1041,7 +1123,7 @@ async def test_same_id_start_is_serialized_and_different_ids_run_in_parallel():
     assert server.max_active_starts == 2
 
 
-async def test_start_timeout_reconciles_created_worker(monkeypatch):
+async def test_start_timeout_does_not_interrupt_ambiguous_worker(monkeypatch):
     value = task()
     server = Server(value)
     client = client_for(server)
@@ -1056,7 +1138,9 @@ async def test_start_timeout_reconciles_created_worker(monkeypatch):
     with pytest.raises(WorkerTimeout) as err:
         await client.start(value, model_verify_attempts=1, model_verify_interval=0)
     assert err.value.conversation_id == CONVERSATION_ID
-    assert any(
+    # A lost create response cannot prove this request created the worker, so
+    # reconciliation must not interrupt a possibly reused conversation.
+    assert not any(
         path == f"/api/conversations/{CONVERSATION_ID}/interrupt" for _, path, _, _ in server.calls
     )
     await client.aclose()
