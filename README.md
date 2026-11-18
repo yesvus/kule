@@ -1,21 +1,25 @@
-# operator-mcp
+# Kule
 
-A small, self-hosted [MCP](https://modelcontextprotocol.io) server for a restricted
-operator pilot. It exposes tools to an AI client over Streamable HTTP, and every call
-is authenticated, authorized by group membership, and recorded in a tamper-evident
-audit log. The currently deployed pilot has **no host shell or Kubernetes access**.
-It does not replace existing break-glass or remote management tools.
+**Your personal MCP gateway.**
 
-## Status
+Connect your AI agents to your tools, services, and infrastructure — on your terms.
 
-**Current live pilot**: `whoami` (read) and `note_write` (scratch-only write)
-are authenticated through ChatGPT's OAuth connection. The optional
-`k8s_overview` tool in this PR is **source-only** until the companion
-`yesvus/ops` RBAC/network/token projection and a reviewed image digest are
-explicitly deployed. It summarizes Node readiness, per-namespace Pod counts,
-and unavailable Deployments without revealing raw Pod specifications, Secrets,
-logs, service-account tokens or allowing host shell / Kubernetes writes.
-The exec tier remains disabled.
+Kule is an open-source, self-hosted gateway for the [Model Context Protocol](https://modelcontextprotocol.io) (MCP). It provides a common access layer for MCP-compatible clients, with optional integrations, identity-based authorization, and auditable tool calls.
+
+## Why Kule?
+
+- **Own your integration layer.** Run Kule on your own infrastructure and connect the clients you choose.
+- **Control access.** Use your identity provider, explicit tool authorization, and narrowly scoped backend credentials.
+- **Compose, don't reinvent.** Reuse upstream MCP servers and service APIs where possible; implement custom tools only when needed.
+- **Keep operations accountable.** Record tool calls and authorization decisions, enforce configurable limits, and retain an emergency disable mechanism.
+
+## Project status and direction
+
+Kule is under active development. The current implementation uses Python and FastMCP, with OAuth/OIDC over Streamable HTTP, group-based tool authorization, auditing, and opt-in integrations. Deployment configuration determines which tools are actually available; source support does not imply that a capability is enabled or validated on every client.
+
+The longer-term direction is a context-efficient, composable gateway: independently deployable capability servers in one open-source repository, optional progressive tool discovery, finer-grained access policies, and an owner-facing administration dashboard for client, session, and permission management. These are roadmap items, not guarantees of present functionality. Dynamic discovery and runtime changes require client compatibility and resource benchmarks.
+
+The Python package and CLI currently retain the historical `operator-mcp` name. The commands below intentionally use that name.
 
 ## Architecture
 
@@ -136,32 +140,14 @@ provider on loopback, so it needs no network access.
 
 Apache License 2.0. See [LICENSE](LICENSE).
 
-## k3s dual-client pilot (ops #461)
+## Deployment notes
 
-The deployment definitions and approval gates live in [yesvus/ops](https://github.com/yesvus/ops) under
-`cluster/operator-mcp-pilot/`. The owner-approved OAuth/MCP gateway is live at
-`https://mcp.yesvus.com/mcp`. Real ChatGPT DCR/OAuth and both pilot tools
-have been verified. Kubernetes access is a separate reviewed rollout.
+- Validate OAuth registration, exact redirect URI allowlists, refresh and reconnect on each intended MCP client.
+- Keep OAuth state, audit logs and emergency controls in appropriately protected persistent storage. Export audit records when stronger external evidence is required.
+- Enable integrations deliberately; use scoped backend identities, least-privilege grants and restricted network access. Do not place broad host or provider credentials in a default deployment.
+- Verify actual discovery, invocation, denied operations and restart behavior before enabling access. Deployment-specific topology and operational records belong outside the public project documentation.
 
-- ChatGPT: OAuth DCR with only the documented redirect URI patterns. Check
-  the exact callback selected by the ChatGPT plugin builder; write-tool support
-  must be proven on the **actual account**.
-- Claude.ai: prefer its published client identity when compatible; otherwise
-  choose automatic registration, with an exact fallback callback
-  `https://claude.ai/api/mcp/auth_callback`. Never permit a wildcard Claude domain.
-- The FastMCP OAuth storage backend must be explicitly verified on Linux.
-  A data directory alone does **not** prove that DCR registrations survive
-  process restarts. Reconnect/re-register and token lifecycle are acceptance tests.
-- Scratch notes, audit records and the kill switch use an isolated volume.
-  Audits redact secrets best-effort; they must not be treated as durable external
-  evidence until exported to the logging pipeline.
-- The currently deployed pilot contains no developer-agent credentials,
-  Docker socket, host paths, kubeconfig, service-account token or host tools.
-  An optional read-only Kubernetes observer would require a dedicated,
-  short-lived projected ServiceAccount identity in a separate rollout;
-  its token must never appear in tool output or audit logs.
-
-## Optional Kubernetes read-only overview (NOT LIVE until separate GitOps rollout)
+## Optional Kubernetes read-only overview
 
 `k8s_overview` is registered **only** when the operator explicitly supplies
 `KULE_K8S_API_URL` (for example,
@@ -187,5 +173,4 @@ Enabling this source alone does **not** restart the running MCP Pod, update
 its publicly available tools, change RBAC, or authorize a rollout.
 The independent GitOps PR must pass exact-head review, RBAC
 `kubectl auth can-i` negatives and the live disposable token read
-before replacing the existing digest. SentinelX remains available for
-break-glass until the Kule operator functionality is independently tested.
+before replacing the existing digest. Retain an independent recovery path until the replacement functionality has been verified.
