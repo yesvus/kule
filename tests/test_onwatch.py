@@ -219,6 +219,12 @@ def test_missing_health_missing_utilization_and_invalid_values_are_unknown():
                 120,
             ),
             _metric(onwatch.AGENT_HEALTHY, {"provider": "range", "account_id": "default"}, 1),
+            _metric(
+                onwatch.QUOTA_UTILIZATION,
+                {"provider": "negative", "quota_type": "5h", "account_id": "default"},
+                -5,
+            ),
+            _metric(onwatch.AGENT_HEALTHY, {"provider": "negative", "account_id": "default"}, 1),
         )
     )
 
@@ -228,7 +234,66 @@ def test_missing_health_missing_utilization_and_invalid_values_are_unknown():
     assert windows["gemini"]["reasons"] == ["health_unknown"]
     assert windows["missing-util"]["reasons"] == ["utilization_missing"]
     assert windows["nan"]["reasons"] == ["utilization_invalid"]
+    assert windows["nan"]["utilization_percent"] is None
+    assert windows["nan"]["remaining_percent"] is None
     assert windows["range"]["reasons"] == ["utilization_out_of_range"]
+    assert windows["range"]["utilization_percent"] is None
+    assert windows["range"]["remaining_percent"] is None
+    assert windows["negative"]["reasons"] == ["utilization_out_of_range"]
+    assert windows["negative"]["utilization_percent"] is None
+    assert windows["negative"]["remaining_percent"] is None
+
+
+def test_health_only_account_is_unknown_not_fresh():
+    samples = onwatch.parse_metrics(
+        _line(
+            _metric(
+                onwatch.AGENT_HEALTHY,
+                {"provider": "codex", "account_id": "default"},
+                1,
+            ),
+            _metric(
+                onwatch.AGENT_LAST_CYCLE_AGE,
+                {"provider": "codex", "account_id": "default"},
+                98,
+            ),
+        )
+    )
+
+    result = onwatch.summarize(samples, now=NOW)
+    row = result["providers"][0]
+    assert result["status"] == "unknown"
+    assert row["health"] == "fresh"
+    assert row["status"] == "unknown"
+    assert row["reasons"] == ["quota_missing"]
+    assert row["windows"] == []
+
+
+def test_alias_containing_raw_account_id_is_omitted():
+    account_id = "987654321"
+    samples = onwatch.parse_metrics(
+        _line(
+            _metric(
+                onwatch.QUOTA_UTILIZATION,
+                {"provider": "codex", "quota_type": "5h", "account_id": account_id},
+                10,
+            ),
+            _metric(onwatch.AGENT_HEALTHY, {"provider": "codex", "account_id": account_id}, 1),
+            _metric(
+                onwatch.ACCOUNT_INFO,
+                {
+                    "provider": "codex",
+                    "account_id": account_id,
+                    "account_name": "Work 987 654 321",
+                },
+                1,
+            ),
+        )
+    )
+
+    result = onwatch.summarize(samples, now=NOW)
+    assert result["providers"][0]["account"] == "account-1"
+    assert account_id not in str(result)
 
 
 def test_stale_agent_marks_each_window_stale():

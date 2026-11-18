@@ -255,7 +255,15 @@ def _useful_alias(
     aliases: dict[tuple[str, str], str], provider: str, account_id: str
 ) -> str | None:
     alias = aliases.get((provider, account_id))
-    return alias if alias and alias not in {account_id, "default"} else None
+    if not alias or alias in {account_id, "default"}:
+        return None
+    # Account names are operator-provided and may themselves contain the
+    # numeric account ID. Omit rather than returning a partial identifier.
+    normalized_account = re.sub(r"[^0-9a-z]", "", account_id.casefold())
+    normalized_alias = re.sub(r"[^0-9a-z]", "", alias.casefold())
+    if normalized_account and normalized_account in normalized_alias:
+        return None
+    return alias
 
 
 def _alias_map(
@@ -372,6 +380,7 @@ def summarize(
                 )
                 reasons: list[str] = []
                 statuses: set[str] = set()
+                valid_utilization = utilization is not None and 0 <= utilization <= 100
 
                 if window_key not in util:
                     statuses.add("unknown")
@@ -379,7 +388,7 @@ def summarize(
                 elif utilization is None:
                     statuses.add("unknown")
                     reasons.append("utilization_invalid")
-                elif not 0 <= utilization <= 100:
+                elif not valid_utilization:
                     statuses.add("unknown")
                     reasons.append("utilization_out_of_range")
                 if reset_status == "unknown":
@@ -398,14 +407,12 @@ def summarize(
                 status = "stale" if "stale" in statuses else "unknown" if statuses else "fresh"
                 window_statuses.append(status)
                 remaining = (
-                    round(max(0.0, min(100.0, 100 - utilization)), 1)
-                    if utilization is not None
-                    else None
+                    round(max(0.0, min(100.0, 100 - utilization)), 1) if valid_utilization else None
                 )
                 windows.append(
                     {
                         "window": window,
-                        "utilization_percent": utilization,
+                        "utilization_percent": utilization if valid_utilization else None,
                         "remaining_percent": remaining,
                         "reset_at": reset_at,
                         "reset_in_seconds": reset_in,
@@ -415,6 +422,7 @@ def summarize(
                     }
                 )
 
+            provider_reasons: list[str] = []
             if window_statuses:
                 account_status = (
                     "stale"
@@ -423,13 +431,22 @@ def summarize(
                     if "unknown" in window_statuses
                     else "fresh"
                 )
+                provider_reasons = sorted(
+                    {reason for window in windows for reason in window["reasons"]}
+                )
             else:
-                account_status = health_status
+                # A healthy poll with no quota series says nothing about quota.
+                # Never turn missing quota into a fresh or unlimited pool.
+                account_status = "stale" if health_status == "stale" else "unknown"
+                provider_reasons = ["quota_missing"]
+                if health_status == "stale":
+                    provider_reasons.append("poll_stale")
             provider_rows.append(
                 {
                     "provider": provider_name,
                     "account": account_labels[key],
                     "status": account_status,
+                    "reasons": provider_reasons,
                     "health": health_status,
                     "agent_healthy": health_value,
                     "last_cycle_age_seconds": round(last_age, 1) if last_age is not None else None,
@@ -512,6 +529,7 @@ def _health_view(snapshot: dict) -> dict:
             "provider": row["provider"],
             "account": row["account"],
             "status": row["status"],
+            "reasons": row["reasons"],
             "health": row["health"],
             "agent_healthy": row["agent_healthy"],
             "last_cycle_age_seconds": row["last_cycle_age_seconds"],

@@ -55,6 +55,8 @@ Per provider account:
 - `health: fresh` — `onwatch_agent_healthy == 1`.
 - `health: stale` — `onwatch_agent_healthy == 0`.
 - `health: unknown` — the health series is absent or invalid.
+- `status: unknown` with reason `quota_missing` — health data exists but no
+  quota window does. A healthy poll alone never makes a quota pool fresh.
 
 Per provider/window:
 
@@ -63,7 +65,9 @@ Per provider/window:
   `OnwatchQuotaResetMissed` alert.
 - `status: unknown` — utilization, reset or health data is missing, invalid or
   outside 0-100. Missing reset data is reported as `reset_status:
-  not_scheduled`; it is never interpreted as unlimited quota.
+  not_scheduled`; it is never interpreted as unlimited quota. A malformed or
+  out-of-range utilization returns `utilization_percent: null` and
+  `remaining_percent: null` rather than a clamped value.
 - `status: fresh` — utilization is valid, health is fresh, and any reset is in
   the future or within the grace window.
 
@@ -72,10 +76,11 @@ fresh. The issue recorded reset timestamps months in the past while `codex`,
 `anthropic` and `antigravity` reported health `1`; those windows are returned
 as stale and must not be used for dispatch.
 
-Account aliases come only from `onwatch_account_info`. Raw numeric account IDs
-and the metrics token are not included in tool output. When no alias exists,
-the output uses stable `account-1`, `account-2` labels derived from sorted
-non-visible IDs.
+Account aliases come only from `onwatch_account_info`. An alias that contains
+the raw account ID, including when formatted with separators, is omitted rather
+than partially redacted. Raw numeric account IDs and the metrics token are not
+included in tool output. When no safe alias exists, the output uses stable
+`account-1`, `account-2` labels derived from sorted non-visible IDs.
 
 ## Configuration
 
@@ -107,7 +112,8 @@ this change: #23 owns the shared registry/auth/worker edits.
 
 ## Proposed #23 worker-selection hook
 
-No worker registry or selection policy is changed here. After wiring, the
+No worker registry, routing engine or selection policy is changed here. This is
+an optional quota-aware dispatch contract for #23 to consume after wiring. The
 worker selector should:
 
 1. Map each ACP profile/model ID to an explicit OnWatch provider and window
