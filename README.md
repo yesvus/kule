@@ -179,7 +179,8 @@ The `anki_` tool namespace exposes only `listDecks`, `findNotes`, and
 allowance and is capped at 25 notes. Note updates reject media URL arguments.
 Delete, sync, scheduling, model mutation, media access, resources, prompts,
 and every unreviewed upstream tool remain unavailable. Anki arguments and
-error text are omitted from audit records; the shared middleware still records
+upstream error text are omitted from audit records. Kule records fixed error
+category codes for rejected duplicate, batch, or media requests, along with
 caller, tool, duration, and result size. Upstream discovery/call failures are
 isolated to Anki tools so Kule's other tools remain available.
 

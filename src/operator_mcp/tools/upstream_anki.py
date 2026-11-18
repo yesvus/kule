@@ -8,7 +8,6 @@ from collections.abc import Sequence
 import mcp_types as mt
 from fastmcp import FastMCP
 from fastmcp.client.transports import StreamableHttpTransport
-from fastmcp.exceptions import ToolError
 from fastmcp.server import create_proxy
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.middleware.middleware import CallNext, MiddlewareContext
@@ -23,6 +22,14 @@ _READ_TOOLS = ("listDecks", "findNotes", "notesInfo")
 _WRITE_TOOLS = ("addNotes", "updateNoteFields")
 # Reviewed against the official AnkiMCP v0.27.0 tool definitions.
 _MAX_BATCH_NOTES = 25
+
+
+def _error(message: str, code: str) -> ToolResult:
+    return ToolResult(
+        content=[mt.TextContent(type="text", text=message)],
+        meta={"anki_error_code": code},
+        is_error=True,
+    )
 
 
 class _AnkiFailureIsolation(Middleware):
@@ -43,23 +50,22 @@ class _AnkiFailureIsolation(Middleware):
         arguments = context.message.arguments or {}
         if name == "addNotes":
             notes = arguments.get("notes")
-            if arguments.get("allowDuplicate") is True:
-                raise ToolError("Anki duplicate creation is disabled")
+            if "allowDuplicate" in arguments and arguments["allowDuplicate"] is not False:
+                return _error("Anki duplicate creation is disabled", "duplicates_disabled")
             if not isinstance(notes, list) or not 1 <= len(notes) <= _MAX_BATCH_NOTES:
-                raise ToolError(f"Anki batches must contain 1 to {_MAX_BATCH_NOTES} notes")
+                return _error(
+                    f"Anki batches must contain 1 to {_MAX_BATCH_NOTES} notes", "batch_limit"
+                )
         if name == "updateNoteFields":
             note = arguments.get("note")
             if isinstance(note, dict) and ("audio" in note or "picture" in note):
-                raise ToolError("Anki media URL updates are disabled")
+                return _error("Anki media URL updates are disabled", "media_url_disabled")
         try:
             result = await call_next(context)
         except Exception:
-            raise ToolError("Anki upstream is unavailable or rejected the request") from None
+            return _error("Anki upstream is unavailable or rejected the request", "upstream_error")
         if result.is_error:
-            return ToolResult(
-                content=[mt.TextContent(type="text", text="Anki upstream rejected the request")],
-                is_error=True,
-            )
+            return _error("Anki upstream rejected the request", "upstream_error")
         return result
 
 

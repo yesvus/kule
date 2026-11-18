@@ -1,7 +1,7 @@
 import json
 
 import pytest
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 from helpers import OPERATOR, OUTSIDER
 
@@ -148,6 +148,45 @@ async def test_whoami_falls_back_to_subject(server, claims):
     async with Client(mcp) as client:
         who = await client.call_tool("whoami", {})
     assert who.data["user"] == "only-sub"
+
+
+async def test_anki_proxy_is_opt_in_and_uses_its_independent_roles(make_cfg, claims, monkeypatch):
+    from operator_mcp import server as srv
+    from operator_mcp.tools import upstream_anki
+
+    backend = FastMCP("synthetic-anki")
+    mount_synthetic = upstream_anki.mount
+
+    @backend.tool()
+    def listDecks() -> list[str]:
+        return ["Fixture"]
+
+    @backend.tool()
+    def addNotes(notes: list[dict]) -> int:
+        return len(notes)
+
+    monkeypatch.delenv("KULE_ANKI_MCP_URL", raising=False)
+    monkeypatch.delenv("KULE_ARGOCD_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.delenv("KULE_K8S_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.setattr(
+        srv.upstream_anki,
+        "mount",
+        lambda mcp: mount_synthetic(mcp, synthetic_backend=backend),
+    )
+
+    claims.value = {"sub": "reader", "groups": ["mcp-anki-read"]}
+    disabled = build_server(make_cfg(), claims_getter=claims)
+    async with Client(disabled) as client:
+        assert not any(tool.name.startswith("anki_") for tool in await client.list_tools())
+
+    monkeypatch.setenv("KULE_ANKI_MCP_URL", "http://anki-mcp.anki.svc.cluster.local:3142/mcp")
+    enabled = build_server(make_cfg(), claims_getter=claims)
+    async with Client(enabled) as client:
+        assert {tool.name for tool in await client.list_tools()} == {"anki_listDecks"}
+
+    claims.value = {"sub": "writer", "groups": ["mcp-anki-write"]}
+    async with Client(enabled) as client:
+        assert {tool.name for tool in await client.list_tools()} == {"anki_addNotes"}
 
 
 def test_fastmcp_home_is_forced(make_cfg, monkeypatch):

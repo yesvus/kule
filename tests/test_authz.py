@@ -166,7 +166,12 @@ def test_anki_permissions_are_independent_of_operator_and_each_other():
 
 
 def test_anki_groups_must_be_distinct_from_all_other_groups():
-    with pytest.raises(ValueError, match="groups must differ"):
-        Policy("ops", "exec", False, anki_read_group="ops")
-    with pytest.raises(ValueError, match="groups must differ"):
-        Policy("ops", "exec", False, anki_write_group="mcp-anki-read")
+    for kwargs in (
+        {"anki_read_group": "ops"},
+        {"anki_read_group": "exec"},
+        {"anki_read_group": "mcp-workspace"},
+        {"anki_read_group": "mcp-developers"},
+        {"anki_write_group": "mcp-anki-read"},
+    ):
+        with pytest.raises(ValueError, match="groups must differ"):
+            Policy("ops", "exec", False, **kwargs)

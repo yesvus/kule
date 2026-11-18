@@ -56,7 +56,7 @@ def validate_anki_mcp_url(raw: str) -> str | None:
     """Accept only the agreed private Anki MCP Service endpoint."""
     if not raw:
         return None
-    if raw != raw.strip() or "?" in raw or "#" in raw:
+    if raw != raw.strip() or not raw.isprintable() or "?" in raw or "#" in raw:
         raise ConfigError("KULE_ANKI_MCP_URL must be the fixed private MCP endpoint")
     try:
         parsed = urlsplit(raw)

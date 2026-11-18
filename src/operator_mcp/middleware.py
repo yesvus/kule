@@ -22,6 +22,9 @@ from .audit import AuditLog
 from .authz import Caller, Policy
 
 ClaimsGetter = Callable[[], Mapping[str, Any] | None]
+_SAFE_ANKI_ERROR_CODES = frozenset(
+    {"batch_limit", "duplicates_disabled", "media_url_disabled", "upstream_error"}
+)
 
 
 def claims_from_request() -> Mapping[str, Any] | None:
@@ -145,6 +148,19 @@ class OperatorMiddleware(Middleware):
                 fields["detail"] = str(exc)
             await self._audit("error", **fields, **who)
             raise
+        if name.startswith("anki_") and result.is_error:
+            meta = result.meta or {}
+            code = meta.get("anki_error_code") if isinstance(meta, Mapping) else None
+            if code not in _SAFE_ANKI_ERROR_CODES:
+                code = "upstream_error"
+            await self._audit(
+                "error",
+                duration_ms=_ms(start),
+                error="ToolError",
+                error_code=code,
+                **who,
+            )
+            return result
         size = _result_size(result)
         if size > self.max_output_bytes:
             await self._audit("oversize", duration_ms=_ms(start), bytes=size, **who)

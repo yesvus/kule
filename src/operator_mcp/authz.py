@@ -1,11 +1,12 @@
 """Deny-by-default, group-based authorization for tool tiers.
 
-Each tool carries exactly one tier tag. A caller may use a tier only if the
-token's groups claim contains the required group. The ``exec`` tier also
-requires its own group and enablement flag. The separate ``workspace`` tier
-requires the workspace group and explicit enablement. A separately gated
-non-operator developer can be admitted to *only* the workspace tier after
-credential isolation. Untagged tools are never callable.
+Each tool carries exactly one tier tag. The read, operate and exec tiers
+require the operator group; exec also requires its own group and enablement
+flag. The workspace tier requires its own group and explicit enablement. A
+separately gated non-operator developer can be admitted to *only* the
+workspace tier after credential isolation. Anki read and write tiers require
+their respective Anki groups independently of operator membership. Untagged
+tools are never callable.
 """
 
 from __future__ import annotations
