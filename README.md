@@ -17,6 +17,25 @@ and unavailable Deployments without revealing raw Pod specifications, Secrets,
 logs, service-account tokens or allowing host shell / Kubernetes writes.
 The exec tier remains disabled.
 
+## Product boundary
+
+Kule is a secure, self-hosted MCP server for infrastructure operations
+and privileged access, not a universal MCP gateway. Its scope is
+infrastructure and workspace operations, scoped credential workflows,
+host access, and its own authorization, sessions, audit and break-glass
+controls. The administration UI manages Kule only.
+
+Prefer independently deployed, maintained upstream MCP servers for
+other domains (Grafana, Anki, GitHub). Preserve the OpenHands adapter as
+a compatibility bridge until native standalone MCP parity is verified.
+Do not aggregate unrelated tools or build a fleet control plane here.
+Fleet deployment and observability belong to the existing GitOps
+and Grafana stack.
+
+See [architecture issue #18](https://github.com/yesvus/kule/issues/18)
+and [ops #1178](https://github.com/yesvus/ops/issues/1178).
+This is the target boundary, not a claim about live rollout status.
+
 ## Architecture
 
 - **Authentication.** FastMCP's OIDC proxy performs OAuth 2.1 with PKCE (S256) against
