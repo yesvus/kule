@@ -710,8 +710,16 @@ async def test_middleware_authorizes_the_dispatched_tool_version(make_cfg, claim
 
     claims.value = {"sub": "dev-agent", "groups": [DEV]}
     async with Client(mcp) as client:
-        # Version 1 is the Worker capability. The higher default version is
-        # credential apply, so a name-only lookup would deny this valid call.
+        # Version 1 is the Worker capability, but the default name-only call
+        # resolves version 2 (credential apply). Do not advertise version 1 as
+        # reachable by a plain name call.
+        assert "versioned" not in {t.name for t in await client.list_tools()}
+        with pytest.raises(ToolError, match="not authorized"):
+            await client.call_tool(
+                "versioned",
+                {"repository": "yesvus/kule", "acp_profile": "opencode"},
+            )
+        # An explicit version selector dispatches version 1 and is authorized.
         result = await client.call_tool(
             "versioned",
             {"repository": "yesvus/kule", "acp_profile": "opencode"},

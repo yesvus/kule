@@ -146,8 +146,20 @@ class OperatorMiddleware(Middleware):
         caller = self._caller()
         roles = self._roles(caller)
         visible: list[Tool] = []
+        default_versions: dict[str, str | None] = {}
         for tool in tools:
             if is_integration_tool(tool.tags):
+                # A name-only call dispatches the highest version. Do not
+                # advertise an older version that the same name-only call
+                # cannot reach; explicit version selectors are still allowed
+                # at call time.
+                if tool.name not in default_versions:
+                    default = None
+                    if context.fastmcp_context is not None:
+                        default = await context.fastmcp_context.fastmcp.get_tool(tool.name)
+                    default_versions[tool.name] = default.version if default else tool.version
+                if default_versions[tool.name] != tool.version:
+                    continue
                 if (
                     self.integrations is not None
                     and self.integrations.discovery_allowed(roles, tool.tags)[0]

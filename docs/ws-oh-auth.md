@@ -118,6 +118,11 @@ registry.register(
 async def openhands_start(repository: str, acp_profile: str) -> dict: ...
 ```
 
+Versioned integration tools are authorized against the version FastMCP will
+dispatch. Discovery advertises only the default (highest) version, so a plain
+name call never reaches a hidden older version; explicit version selectors are
+still authorized on their own capability tags.
+
 The server accepts a registry via
 `build_server(cfg, claims_getter=..., integrations=registry)`. An empty registry
 fails closed: integration tools are invisible and every direct call is denied.
