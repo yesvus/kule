@@ -721,7 +721,7 @@ def parse_pr_evidence(text: str, task: WorkerTask) -> PullRequestEvidence:
     if not isinstance(payload, dict):
         raise WorkerError("worker-evidence block must be an object")
 
-    raw_blockers = payload.get("blockers")
+    raw_blockers = payload.get("blockers", [])
     if not isinstance(raw_blockers, list) or len(raw_blockers) > 50:
         raise WorkerError("blockers must be a list of up to 50 entries")
     blockers = tuple(
@@ -1009,11 +1009,12 @@ class WorkerClient:
         body = build_start_request(task, repo_path, preflight)
         request_started = False
         try:
-            async with self._start_slots:
-                # Same-ID creates are serialized client-side. Upstream's
-                # lifecycle lock is taken after worktree creation, so two
-                # concurrent creates can race the force-remove step.
-                async with self._start_lock(task.conversation_id):
+            # Same-ID creates are serialized client-side. Upstream's lifecycle
+            # lock is taken after worktree creation, so two concurrent creates
+            # can race the force-remove step. Take this lock before the start
+            # slot so a same-ID waiter does not consume admission capacity.
+            async with self._start_lock(task.conversation_id):
+                async with self._start_slots:
                     request_started = True
                     status, info = await self._request(
                         "POST",
