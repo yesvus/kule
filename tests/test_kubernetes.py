@@ -179,3 +179,140 @@ async def test_redirect_denied_without_following_second_origin():
                 {"Authorization": "Bearer synthetic-test-token"},
             )
     assert visited == ["10.0.1.248"]
+
+
+async def test_inspection_opt_in_scope_projection_and_authorization(make_cfg, claims, monkeypatch):
+    monkeypatch.setenv("KULE_K8S_API_URL", "https://10.0.1.248:6443")
+    monkeypatch.setenv("KULE_K8S_INSPECT_ENABLED", "1")
+    monkeypatch.setattr(kubernetes, "_TOKEN_PATH", SimpleNamespace(read_text=lambda: "test-token"))
+    monkeypatch.setattr(kubernetes.ssl, "create_default_context", lambda **kwargs: True)
+    paths = []
+
+    async def fake_get(client, base, path, headers, *, allow_missing=False):
+        assert base == "https://10.0.1.248:6443"
+        assert headers["Authorization"] == "Bearer test-token"
+        assert allow_missing
+        paths.append(path)
+        if path.endswith("/pushsecrets.external-secrets.io"):
+            return None
+        if path.endswith("/secretstores.external-secrets.io"):
+            return {
+                "metadata": {"annotations": {"secret": "synthetic-sensitive-value"}},
+                "spec": {
+                    "group": "external-secrets.io",
+                    "names": {"kind": "SecretStore"},
+                    "scope": "Namespaced",
+                    "versions": [
+                        {
+                            "name": "v1",
+                            "served": True,
+                            "storage": True,
+                            "schema": {"description": "synthetic-sensitive-value"},
+                        }
+                    ],
+                },
+                "status": {
+                    "conditions": [
+                        {
+                            "type": "Established",
+                            "status": "True",
+                            "message": "synthetic-sensitive-value",
+                        }
+                    ]
+                },
+            }
+        if path.endswith("/eso-observability-external-secrets"):
+            return {
+                "metadata": {"annotations": {"secret": "synthetic-sensitive-value"}},
+                "spec": {
+                    "replicas": 1,
+                    "template": {
+                        "spec": {
+                            "containers": [
+                                {
+                                    "name": "external-secrets",
+                                    "image": "ghcr.io/external-secrets/external-secrets:v2.15.0",
+                                    "args": [
+                                        "--enable-push-secret-reconciler=false",
+                                        "--enable-cluster-push-secret-reconciler=true",
+                                        "--token=synthetic-sensitive-value",
+                                        "--enable-cluster-store-reconciler=synthetic-sensitive-value",
+                                    ],
+                                    "env": [{"value": "synthetic-sensitive-value"}],
+                                    "volumeMounts": [{"name": "synthetic-sensitive-value"}],
+                                }
+                            ]
+                        }
+                    },
+                },
+                "status": {"readyReplicas": 1, "availableReplicas": 1},
+            }
+        raise AssertionError("Unexpected API path")
+
+    monkeypatch.setattr(kubernetes, "_get_json", fake_get)
+    mcp = build_server(make_cfg(), claims_getter=claims)
+    claims.value = OPERATOR
+    async with Client(mcp) as client:
+        tools = {tool.name: tool for tool in await client.list_tools()}
+        assert tools["k8s_crd_inspect"].annotations.read_only_hint
+        assert tools["k8s_deployment_inspect"].annotations.read_only_hint
+        missing = await client.call_tool(
+            "k8s_crd_inspect", {"name": "pushsecrets.external-secrets.io"}
+        )
+        assert missing.data["exists"] is False
+        crd = await client.call_tool(
+            "k8s_crd_inspect", {"name": "secretstores.external-secrets.io"}
+        )
+        assert crd.data["versions"] == [{"name": "v1", "served": True, "storage": True}]
+        assert "synthetic-sensitive-value" not in str(crd.data)
+        deployment = await client.call_tool(
+            "k8s_deployment_inspect",
+            {"namespace": "external-secrets", "name": "eso-observability-external-secrets"},
+        )
+        assert deployment.data["ready"] == 1
+        assert deployment.data["containers"][0]["reconciler_flags"] == {
+            "--enable-push-secret-reconciler": False,
+            "--enable-cluster-push-secret-reconciler": True,
+        }
+        assert "synthetic-sensitive-value" not in str(deployment.data)
+        invalid = [
+            ("k8s_crd_inspect", {"name": "../../api/v1/secrets"}),
+            ("k8s_crd_inspect", {"name": "secrets"}),
+            (
+                "k8s_deployment_inspect",
+                {"namespace": "production", "name": "eso-observability-external-secrets"},
+            ),
+            (
+                "k8s_deployment_inspect",
+                {"namespace": "external-secrets", "name": "unapproved"},
+            ),
+        ]
+        for tool, args in invalid:
+            with pytest.raises(ToolError):
+                await client.call_tool(tool, args)
+    assert len(paths) == 3
+    claims.value = OUTSIDER
+    async with Client(mcp) as client:
+        assert await client.list_tools() == []
+        with pytest.raises(ToolError):
+            await client.call_tool("k8s_crd_inspect", {"name": "pushsecrets.external-secrets.io"})
+    assert len(paths) == 3
+
+
+@pytest.mark.parametrize("status", [403, 404])
+async def test_inspection_distinguishes_forbidden_from_missing(status):
+    async with httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda request: httpx2.Response(status)),
+        follow_redirects=False,
+    ) as client:
+        args = (
+            client,
+            "https://10.0.1.248:6443",
+            "/apis/apiextensions.k8s.io/v1/customresourcedefinitions/approved",
+            {"Authorization": "Bearer test-token"},
+        )
+        if status == 404:
+            assert await kubernetes._get_json(*args, allow_missing=True) is None
+        else:
+            with pytest.raises(RuntimeError, match="status read failed"):
+                await kubernetes._get_json(*args, allow_missing=True)
