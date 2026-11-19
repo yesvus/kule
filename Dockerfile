@@ -1,6 +1,6 @@
 # Build the published multi-arch application image in CI. Deploy ONLY by the
 # resulting verified OCI index digest (linux/arm64 present), never by a tag.
-FROM python:3.13.9-slim-bookworm AS wheelhouse
+FROM python:3.15.2-slim-bookworm AS wheelhouse
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
@@ -16,7 +16,7 @@ COPY contrib/argocd-mcp/package.json contrib/argocd-mcp/package-lock.json /opt/a
 RUN cd /opt/argocd-mcp && npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 RUN test -f /opt/argocd-mcp/node_modules/argocd-mcp/dist/index.js
 
-FROM python:3.13.9-slim-bookworm AS runtime
+FROM python:3.15.2-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
