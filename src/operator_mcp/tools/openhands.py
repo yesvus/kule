@@ -61,9 +61,23 @@ _ALLOWED_MODELS = (
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/mimo-v2.6-flash",
 )
+
+
 # A single agent run stays bounded even when the caller omits the limit.
-_MAX_ITERATIONS = 100
-_DEFAULT_ITERATIONS = 50
+def _iteration_limit(name: str, fallback: int, ceiling: int) -> int:
+    """Read a reviewed iteration bound; invalid values fail closed at startup."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return fallback
+    if not raw.isascii() or not raw.isdigit() or not 1 <= int(raw) <= ceiling:
+        raise RuntimeError(f"{name} must be an integer from 1 to {ceiling}")
+    return int(raw)
+
+
+_MAX_ITERATIONS = _iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000)
+_DEFAULT_ITERATIONS = _iteration_limit("KULE_OPENHANDS_DEFAULT_ITERATIONS", 50, 1000)
+if _DEFAULT_ITERATIONS > _MAX_ITERATIONS:
+    raise RuntimeError("KULE_OPENHANDS_DEFAULT_ITERATIONS must not exceed the maximum")
 _MAX_LIST_PAGES = 5
 _CURSOR_PREFIX = "gc1."
 _CURSOR_NONCE_BYTES = 12

@@ -33,6 +33,8 @@ FastMCP 4.2.0 `FastMCP.from_openapi()` and reduces the upstream schema before mo
 | `KULE_OPENHANDS_API_KEY` | Dedicated Canvas service key, sent only as `X-Session-API-Key`. Never a browser cookie or shared operator credential. |
 | `KULE_OPENHANDS_CA_FILE` | Optional absolute path to a readable public CA PEM bundle for the configured HTTPS listener. Required for the planned private-CA Tezgah listener. If unset, normal client TLS trust applies; if set but invalid, startup and `check-config` fail closed when the adapter is enabled. |
 | `KULE_OPENHANDS_REPOSITORIES` | JSON object mapping each approved canonical `owner/name` to its exact Canvas source path, for example `{"yesvus/kule":"/workspace/src/kule"}`. Required; 1–64 entries; no path root, `..`, duplicate name or duplicate path. |
+| `KULE_OPENHANDS_MAX_ITERATIONS` | Optional integer 1 to 1000, default `100`. Upper bound for a worker run launched through Kule. Starting value to be tuned from measured runs. Lead seats started directly through Canvas are not affected. Invalid values fail startup. |
+| `KULE_OPENHANDS_DEFAULT_ITERATIONS` | Optional integer 1 to 1000, default `50`, must not exceed the maximum. Applied when the caller omits `max_iterations`. |
 
 The HTTP client pins the origin, disables redirects and ignores proxy environment
 variables, so the service key cannot follow a redirect or an ambient proxy to another

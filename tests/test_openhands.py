@@ -1559,3 +1559,14 @@ async def test_outsider_sees_no_openhands_tools(gateway):
                 await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
     records = [json.loads(line) for line in Path(audit).read_text().splitlines()]
     assert records[-1]["event"] == "denied"
+
+
+def test_iteration_limits_are_configurable_and_fail_closed(monkeypatch):
+    monkeypatch.delenv("KULE_OPENHANDS_MAX_ITERATIONS", raising=False)
+    assert openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000) == 100
+    monkeypatch.setenv("KULE_OPENHANDS_MAX_ITERATIONS", "250")
+    assert openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000) == 250
+    for bad in ("0", "1001", "-1", "abc", "1.5", " 5", ""):
+        monkeypatch.setenv("KULE_OPENHANDS_MAX_ITERATIONS", bad)
+        with pytest.raises(RuntimeError, match="must be an integer"):
+            openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000)
