@@ -50,6 +50,7 @@ _REPOSITORY = re.compile(r"^(?!\.{1,2}/)(?!.*/\.{1,2}$)[A-Za-z0-9_.-]+/[A-Za-z0-
 _BRANCH = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,200}$")
 _BRANCH_PREFIX = re.compile(r"^([A-Za-z0-9][A-Za-z0-9._/-]{0,200})?$")
 _TAG_KEY = re.compile(r"^[a-z0-9]{1,64}$")
+_DNS_LABEL = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _MAX_MESSAGE_BLOCKS = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_MESSAGE_TOTAL_BYTES = 64 * 1024
@@ -270,18 +271,47 @@ _AUDIT_FIELDS = frozenset(
 )
 
 
-def _origin(raw: str) -> str:
-    """Require one fixed HTTPS origin; never send the API key over cleartext."""
+def _allow_cluster_http(env: Mapping[str, str]) -> bool:
+    """Require explicit opt-in before permitting cluster-local HTTP."""
+    return env.get("KULE_OPENHANDS_ALLOW_CLUSTER_HTTP") == "1"
+
+
+def _is_cluster_http_host(hostname: str) -> bool:
+    """Allow only loopback or <service>.<namespace>.svc[.cluster.local]."""
+    host = hostname.lower()
+    if host in {"localhost", "127.0.0.1", "::1"}:
+        return True
+    parts = host.split(".")
+    if len(parts) == 5 and parts[2:] == ["svc", "cluster", "local"]:
+        return all(_DNS_LABEL.fullmatch(label) for label in parts[:2])
+    if len(parts) == 3 and parts[2:] == ["svc"]:
+        return all(_DNS_LABEL.fullmatch(label) for label in parts[:2])
+    return False
+
+
+def _origin(raw: str, *, allow_cluster_http: bool = False) -> str:
+    """Require a fixed HTTPS origin unless cluster-local HTTP is explicitly opted in."""
+    message = (
+        "KULE_OPENHANDS_API_URL must be an HTTPS origin or a cluster-local HTTP service origin"
+        if allow_cluster_http
+        else "KULE_OPENHANDS_API_URL must be an HTTPS origin"
+    )
     if not raw or raw != raw.strip() or "?" in raw or "#" in raw:
-        raise RuntimeError("KULE_OPENHANDS_API_URL must be an HTTPS origin")
+        raise RuntimeError(message)
     base = raw.rstrip("/")
     try:
         parsed = urlsplit(base)
         port = parsed.port
     except ValueError:
-        raise RuntimeError("KULE_OPENHANDS_API_URL must be an HTTPS origin") from None
+        raise RuntimeError(message) from None
+    scheme_ok = parsed.scheme == "https" or (
+        parsed.scheme == "http"
+        and allow_cluster_http
+        and bool(parsed.hostname)
+        and _is_cluster_http_host(parsed.hostname)
+    )
     if (
-        parsed.scheme != "https"
+        not scheme_ok
         or not parsed.hostname
         or not parsed.netloc
         or parsed.username is not None
@@ -289,12 +319,14 @@ def _origin(raw: str) -> str:
         or parsed.path
         or (port is not None and not 1 <= port <= 65535)
     ):
-        raise RuntimeError("KULE_OPENHANDS_API_URL must be an HTTPS origin")
+        raise RuntimeError(message)
     return base
 
 
-def _api_key(raw: str) -> str:
+def _api_key(raw: str, *, required: bool = True) -> str | None:
     """A dedicated service key, never a browser cookie or broad host credential."""
+    if not required and raw == "":
+        return None
     if (
         not raw
         or len(raw) > 4096
@@ -356,20 +388,28 @@ def _repositories(raw: str) -> dict[str, str]:
     return approved
 
 
-def settings_from_env(env: Mapping[str, str] | None = None) -> tuple[dict[str, str], str, str]:
+def settings_from_env(
+    env: Mapping[str, str] | None = None,
+) -> tuple[dict[str, str], str, str | None]:
     """Validate the opt-in Canvas settings without creating a client or calling Canvas."""
     values = os.environ if env is None else env
     repositories = _repositories(values.get("KULE_OPENHANDS_REPOSITORIES", ""))
-    origin = _origin(values.get("KULE_OPENHANDS_API_URL", ""))
-    key = _api_key(values.get("KULE_OPENHANDS_API_KEY", ""))
+    allow_http = _allow_cluster_http(values)
+    origin = _origin(values.get("KULE_OPENHANDS_API_URL", ""), allow_cluster_http=allow_http)
+    key_required = not (allow_http and origin.startswith("http://"))
+    key = _api_key(values.get("KULE_OPENHANDS_API_KEY", ""), required=key_required)
     return repositories, origin, key
 
 
-def _tls_verify(env: Mapping[str, str] | None = None) -> bool | ssl.SSLContext:
+def _tls_verify(
+    env: Mapping[str, str] | None = None, *, origin: str | None = None
+) -> bool | ssl.SSLContext:
     """Use explicit integration-local trust, never ambient CA or proxy settings."""
     values = os.environ if env is None else env
     if "KULE_OPENHANDS_CA_FILE" not in values:
         return True
+    if origin is not None and origin.startswith("http://"):
+        raise RuntimeError("KULE_OPENHANDS_CA_FILE requires an HTTPS origin")
     raw = values["KULE_OPENHANDS_CA_FILE"]
     try:
         if not raw or raw != raw.strip() or not Path(raw).is_absolute():
@@ -383,8 +423,8 @@ def _tls_verify(env: Mapping[str, str] | None = None) -> bool | ssl.SSLContext:
 
 def validate_settings(env: Mapping[str, str] | None = None) -> None:
     """Offline config preflight: validate settings and explicitly configured trust."""
-    settings_from_env(env)
-    _tls_verify(env)
+    _, origin, _ = settings_from_env(env)
+    _tls_verify(env, origin=origin)
 
 
 @lru_cache(maxsize=1)
@@ -575,11 +615,12 @@ class _ScopedClient(httpx2.AsyncClient):
 
 
 def _client(
-    origin: str, key: str, timeout_seconds: float, *, verify: bool | ssl.SSLContext = True
+    origin: str, key: str | None, timeout_seconds: float, *, verify: bool | ssl.SSLContext = True
 ) -> httpx2.AsyncClient:
+    headers = {_API_KEY_HEADER: key} if key is not None else {}
     return _ScopedClient(
         base_url=origin,
-        headers={_API_KEY_HEADER: key},
+        headers=headers,
         api_key=key,
         timeout=max(1.0, min(20.0, timeout_seconds - 1.0)),
         follow_redirects=False,
@@ -1165,14 +1206,14 @@ def mount(
     timeout_seconds: float = 20.0,
 ) -> None:
     """Mount the reviewed Canvas management tools; client injection is for tests."""
-    repositories = _repositories(os.environ.get("KULE_OPENHANDS_REPOSITORIES", ""))
     lifespan = None
     api_key: str | None = None
     if client is None:
-        origin = _origin(os.environ.get("KULE_OPENHANDS_API_URL", ""))
-        api_key = _api_key(os.environ.get("KULE_OPENHANDS_API_KEY", ""))
-        client = _client(origin, api_key, timeout_seconds, verify=_tls_verify())
+        repositories, origin, api_key = settings_from_env()
+        client = _client(origin, api_key, timeout_seconds, verify=_tls_verify(origin=origin))
         lifespan = _closing_lifespan(client)
+    else:
+        repositories = _repositories(os.environ.get("KULE_OPENHANDS_REPOSITORIES", ""))
 
     backend = FastMCP.from_openapi(
         _restricted_spec(),
