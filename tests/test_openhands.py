@@ -36,6 +36,8 @@ READ_TOOLS = {
     "oh_get_conversation_runtime",
     "oh_search_events",
     "oh_get_event",
+    "oh_count_events",
+    "oh_get_final_response",
     "oh_list_agent_profiles",
 }
 OPERATE_TOOLS = {
@@ -90,7 +92,9 @@ def test_pinned_fixture_and_endpoint_allowlist():
     )
 
     start = restricted["components"]["schemas"]["StartConversationRequest"]
-    assert set(start["properties"]) == openhands._START_FIELDS - {"repository"}
+    assert set(start["properties"]) == openhands._START_FIELDS
+    assert "model" not in start["properties"]
+    assert "repository" not in start["properties"]
     assert start["required"] == ["workspace", "agent_profile_id"]
     assert start["additionalProperties"] is False
     assert "agent_settings" not in start["properties"]
@@ -211,6 +215,7 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
     start = tools["oh_start_conversation"].input_schema
     assert set(start["properties"]) == {
         "repository",
+        "model",
         "workspace",
         "worktree",
         "worktree_options",
@@ -221,7 +226,10 @@ async def test_start_conversation_schema_hides_secrets_and_shell(gateway):
         "tags",
         "autotitle",
     }
-    assert start["required"] == ["workspace", "agent_profile_id", "repository"]
+    assert start["required"] == ["workspace", "agent_profile_id", "repository", "model"]
+    assert start["properties"]["model"]["enum"] == list(openhands._ALLOWED_MODELS)
+    assert start["properties"]["max_iterations"]["maximum"] == openhands._MAX_ITERATIONS
+    assert start["properties"]["max_iterations"]["default"] == openhands._DEFAULT_ITERATIONS
     assert "repository" in start["properties"]
     assert start["properties"]["workspace"]["additionalProperties"] is False
     assert set(start["properties"]["workspace"]["properties"]) == {"working_dir"}
@@ -275,6 +283,7 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
 
     start = {
         "repository": REPOSITORY,
+        "model": "opencode-go/deepseek-v4.1-flash",
         "workspace": {"working_dir": "/workspace/src/kule"},
         "agent_profile_id": PROFILE,
     }
@@ -327,6 +336,7 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                     )
             for field, value in (
                 ("max_iterations", "many"),
+                ("max_iterations", 101),
                 ("max_iterations", 5000),
                 ("max_budget_per_run", -1),
                 ("max_budget_per_run", 10**10000),
@@ -340,6 +350,17 @@ async def test_target_guard_and_unknown_arguments_never_reach_canvas(gateway):
                 await caller.call_tool(
                     "oh_start_conversation",
                     {**start, "tags": {"kulerepo": OTHER_REPOSITORY}},
+                )
+            with pytest.raises(ToolError, match="must not run before model verification"):
+                await caller.call_tool(
+                    "oh_start_conversation",
+                    {
+                        **start,
+                        "initial_message": {
+                            "content": [{"type": "text", "text": "run now"}],
+                            "run": True,
+                        },
+                    },
                 )
             with pytest.raises(ToolError, match="agent profile"):
                 await caller.call_tool(
@@ -445,6 +466,10 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                     "id": CONVERSATION,
                     "execution_status": "running",
                     "tags": {"kulerepo": REPOSITORY},
+                    "current_model_id": "opencode-go/deepseek-v4.1-flash",
+                    "available_models": [
+                        {"model_id": "opencode-go/deepseek-v4.1-flash"},
+                    ],
                 },
             )
         return httpx2.Response(200, json={"ok": True})
@@ -469,6 +494,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                 "oh_start_conversation",
                 {
                     "repository": REPOSITORY,
+                    "model": "opencode-go/deepseek-v4.1-flash",
                     "workspace": {"working_dir": "/workspace/src/kule"},
                     "worktree": True,
                     "worktree_options": {
@@ -482,6 +508,8 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
                 },
             )
             assert started.data["id"] == CONVERSATION
+            assert started.data["model_verified"] is True
+            assert started.data["effective_model"] == "opencode-go/deepseek-v4.1-flash"
             await caller.call_tool(
                 "oh_send_message",
                 {
@@ -499,6 +527,8 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
     assert [(request.method, request.url.path) for request in requests] == [
         ("GET", "/api/conversations/search"),
         ("POST", "/api/conversations"),
+        ("POST", f"/api/conversations/{CONVERSATION}/switch_acp_model"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
         ("GET", f"/api/conversations/{CONVERSATION}"),
         ("POST", f"/api/conversations/{CONVERSATION}/events"),
         ("GET", f"/api/conversations/{CONVERSATION}"),
@@ -508,6 +538,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
         request.headers["X-Session-API-Key"] == "dedicated-service-key" for request in requests
     )
     assert "repository" not in requests[0].url.params
+    assert json.loads(requests[2].content) == {"model": "opencode-go/deepseek-v4.1-flash"}
     body = json.loads(requests[1].content)
     assert body == {
         "workspace": {"working_dir": "/workspace/src/kule"},
@@ -518,6 +549,7 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
         "tags": {"kuleissue": "yesvus/kule#23", "kulerepo": REPOSITORY},
         "max_iterations": 100,
     }
+    assert "model" not in body
 
     raw = Path(audit).read_text()
     assert prompt not in raw
@@ -529,12 +561,196 @@ async def test_management_calls_use_service_key_and_audit_prompt_digest(gateway)
     assert start["args"]["working_dir"] == "/workspace/src/kule"
 
 
+def test_start_requires_an_allowlisted_model_and_caps_iterations():
+    guard = openhands._TargetGuard(
+        None,  # type: ignore[arg-type]
+        {REPOSITORY: "/workspace/src/kule"},
+        b"cursor-key",
+    )
+    base = {
+        "repository": REPOSITORY,
+        "workspace": {"working_dir": "/workspace/src/kule"},
+        "agent_profile_id": PROFILE,
+    }
+    with pytest.raises(AuthorizationError, match="explicit model is required"):
+        guard._start(dict(base))
+    with pytest.raises(AuthorizationError, match="model is not approved"):
+        guard._start({**base, "model": "openai/gpt-5.5"})
+    for model in openhands._ALLOWED_MODELS:
+        arguments = {**base, "model": model}
+        guard._start(arguments)
+        assert arguments["max_iterations"] == openhands._DEFAULT_ITERATIONS
+    with pytest.raises(AuthorizationError, match="iteration limit"):
+        guard._start(
+            {
+                **base,
+                "model": openhands._ALLOWED_MODELS[0],
+                "max_iterations": openhands._MAX_ITERATIONS + 1,
+            }
+        )
+
+
+async def test_start_applies_and_verifies_the_requested_model(gateway):
+    mcp, _, _ = gateway
+    requests: list[httpx2.Request] = []
+    model = "opencode-go/mimo-v2.6-flash"
+    state: dict[str, str | None] = {"current_model_id": None}
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == "/api/conversations":
+            return httpx2.Response(200, json={"id": CONVERSATION, "execution_status": "idle"})
+        if request.url.path == f"/api/conversations/{CONVERSATION}/switch_acp_model":
+            state["current_model_id"] = json.loads(request.content)["model"]
+            return httpx2.Response(200, json={"success": True})
+        if request.url.path == f"/api/conversations/{CONVERSATION}":
+            return httpx2.Response(
+                200,
+                json={
+                    "id": CONVERSATION,
+                    "execution_status": "idle",
+                    "tags": {"kulerepo": REPOSITORY},
+                    "current_model_id": state["current_model_id"],
+                    "available_models": [{"model_id": model}],
+                    "secret_registry": {"LEAK": "value"},
+                },
+            )
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            started = await caller.call_tool(
+                "oh_start_conversation",
+                {
+                    "repository": REPOSITORY,
+                    "model": model,
+                    "workspace": {"working_dir": "/workspace/src/kule"},
+                    "worktree": True,
+                    "worktree_options": {"branch_prefix": "oh23/kule/"},
+                    "agent_profile_id": PROFILE,
+                },
+            )
+
+    assert started.data["id"] == CONVERSATION
+    assert started.data["effective_model"] == model
+    assert started.data["model_verified"] is True
+    assert "secret_registry" not in started.data
+    create = json.loads(requests[0].content)
+    assert "model" not in create
+    assert create["max_iterations"] == openhands._DEFAULT_ITERATIONS
+    assert json.loads(requests[1].content) == {"model": model}
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/api/conversations"),
+        ("POST", f"/api/conversations/{CONVERSATION}/switch_acp_model"),
+        ("GET", f"/api/conversations/{CONVERSATION}"),
+    ]
+
+
+async def test_start_fails_closed_when_the_effective_model_is_not_verified(gateway):
+    mcp, _, _ = gateway
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == "/api/conversations":
+            return httpx2.Response(200, json={"id": CONVERSATION, "execution_status": "idle"})
+        if request.url.path == f"/api/conversations/{CONVERSATION}/switch_acp_model":
+            return httpx2.Response(200, json={"success": True})
+        if request.url.path == f"/api/conversations/{CONVERSATION}":
+            return httpx2.Response(
+                200,
+                json={
+                    "id": CONVERSATION,
+                    "tags": {"kulerepo": REPOSITORY},
+                    "current_model_id": "openai/gpt-5.5",
+                },
+            )
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            with pytest.raises(ToolError, match="effective model is not verified"):
+                await caller.call_tool(
+                    "oh_start_conversation",
+                    {
+                        "repository": REPOSITORY,
+                        "model": "opencode-go/deepseek-v4.1-flash",
+                        "workspace": {"working_dir": "/workspace/src/kule"},
+                        "agent_profile_id": PROFILE,
+                    },
+                )
+
+    assert not any(request.url.path.endswith(("/run", "/events")) for request in requests)
+
+
+async def test_final_response_and_event_count_are_repository_scoped(gateway):
+    mcp, _, _ = gateway
+    requests: list[httpx2.Request] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        requests.append(request)
+        if request.url.path == f"/api/conversations/{CONVERSATION}":
+            return httpx2.Response(200, json={"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}})
+        if request.url.path == f"/api/conversations/{OTHER_CONVERSATION}":
+            return httpx2.Response(
+                200, json={"id": OTHER_CONVERSATION, "tags": {"kulerepo": OTHER_REPOSITORY}}
+            )
+        if request.url.path == f"/api/conversations/{CONVERSATION}/agent_final_response":
+            return httpx2.Response(200, json={"response": "done"})
+        if request.url.path == f"/api/conversations/{CONVERSATION}/events/count":
+            return httpx2.Response(200, json=42)
+        return httpx2.Response(200, json={"ok": True})
+
+    async with httpx2.AsyncClient(
+        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
+    ) as client:
+        openhands.mount(mcp, client=client)
+        async with Client(mcp) as caller:
+            final = await caller.call_tool(
+                "oh_get_final_response",
+                {"repository": REPOSITORY, "conversation_id": CONVERSATION},
+            )
+            count = await caller.call_tool(
+                "oh_count_events",
+                {
+                    "repository": REPOSITORY,
+                    "conversation_id": CONVERSATION,
+                    "kind": "MessageEvent",
+                },
+            )
+            with pytest.raises(ToolError, match="outside the requested repository"):
+                await caller.call_tool(
+                    "oh_count_events",
+                    {"repository": REPOSITORY, "conversation_id": OTHER_CONVERSATION},
+                )
+
+    assert final.data == {"response": "done"}
+    assert count.data == 42
+    counted = next(request for request in requests if request.url.path.endswith("/events/count"))
+    assert counted.url.params["kind"] == "MessageEvent"
+    assert "repository" not in counted.url.params
+    assert requests[-1].url.path == f"/api/conversations/{OTHER_CONVERSATION}"
+
+
 async def test_rate_limited_run_surfaces_the_fastmcp_retry_error(gateway):
     mcp, _, _ = gateway
 
     def handler(request: httpx2.Request) -> httpx2.Response:
         if request.url.path == f"/api/conversations/{CONVERSATION}":
-            return httpx2.Response(200, json={"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}})
+            return httpx2.Response(
+                200,
+                json={
+                    "id": CONVERSATION,
+                    "tags": {"kulerepo": REPOSITORY},
+                    "current_model_id": "opencode-go/deepseek-v4.1-flash",
+                },
+            )
         if request.url.path == f"/api/conversations/{CONVERSATION}/events":
             return httpx2.Response(429, json={"detail": "too many requests"})
         return httpx2.Response(200, json={"ok": True})
@@ -571,9 +787,10 @@ async def test_direct_id_actions_require_matching_native_repository_tag(gateway)
         if request.method == "GET" and path.startswith("/api/conversations/"):
             conversation_id = path.rsplit("/", 1)[-1]
             if conversation_id in tags:
-                return httpx2.Response(
-                    200, json={"id": conversation_id, "tags": tags[conversation_id]}
-                )
+                body = {"id": conversation_id, "tags": tags[conversation_id]}
+                if conversation_id == CONVERSATION:
+                    body["current_model_id"] = "opencode-go/deepseek-v4.1-flash"
+                return httpx2.Response(200, json=body)
         return httpx2.Response(200, json={"ok": True})
 
     async with httpx2.AsyncClient(
@@ -701,8 +918,10 @@ def _full_conversation(conversation_id: str) -> dict:
         "forked_from_event_id": "FORK-EVENT-SECRET",
         "leaf_event_id": "LEAF-EVENT-SECRET",
         "available_models": [
-            {"model_id": "model", "name": "Model", "description": "desc", "extra": "MODEL-SECRET"}
+            {"model_id": "model", "name": "Model", "description": "desc", "extra": "MODEL-SECRET"},
+            {"model_id": "opencode-go/deepseek-v4.1-flash"},
         ],
+        "current_model_id": "opencode-go/deepseek-v4.1-flash",
         "metrics": {
             "model_name": "model",
             "accumulated_cost": 1.5,
@@ -739,6 +958,7 @@ async def test_conversation_responses_are_projected_to_lifecycle_fields(gateway)
                 "oh_start_conversation",
                 {
                     "repository": REPOSITORY,
+                    "model": "opencode-go/deepseek-v4.1-flash",
                     "workspace": {"working_dir": "/workspace/src/kule"},
                     "agent_profile_id": PROFILE,
                 },
@@ -754,7 +974,8 @@ async def test_conversation_responses_are_projected_to_lifecycle_fields(gateway)
         }
         assert data["agent_profile_id"] == PROFILE
         assert data["available_models"] == [
-            {"model_id": "model", "name": "Model", "description": "desc"}
+            {"model_id": "model", "name": "Model", "description": "desc"},
+            {"model_id": "opencode-go/deepseek-v4.1-flash"},
         ]
         assert set(data["metrics"]) == {
             "model_name",
@@ -955,6 +1176,7 @@ def test_launch_checkout_is_bound_to_the_approved_repository_mapping():
     guard = openhands._TargetGuard(None, approved, b"cursor-key")  # type: ignore[arg-type]
     base = {
         "repository": REPOSITORY,
+        "model": "opencode-go/deepseek-v4.1-flash",
         "agent_profile_id": PROFILE,
         "tags": {"kuleissue": "yesvus/kule#27"},
     }
@@ -1337,3 +1559,14 @@ async def test_outsider_sees_no_openhands_tools(gateway):
                 await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
     records = [json.loads(line) for line in Path(audit).read_text().splitlines()]
     assert records[-1]["event"] == "denied"
+
+
+def test_iteration_limits_are_configurable_and_fail_closed(monkeypatch):
+    monkeypatch.delenv("KULE_OPENHANDS_MAX_ITERATIONS", raising=False)
+    assert openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000) == 100
+    monkeypatch.setenv("KULE_OPENHANDS_MAX_ITERATIONS", "250")
+    assert openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000) == 250
+    for bad in ("0", "1001", "-1", "abc", "1.5", " 5", ""):
+        monkeypatch.setenv("KULE_OPENHANDS_MAX_ITERATIONS", bad)
+        with pytest.raises(RuntimeError, match="must be an integer"):
+            openhands._iteration_limit("KULE_OPENHANDS_MAX_ITERATIONS", 100, 1000)
