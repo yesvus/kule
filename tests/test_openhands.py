@@ -649,69 +649,6 @@ async def test_start_applies_and_verifies_the_requested_model(gateway):
     ]
 
 
-async def test_unverified_or_unapproved_model_blocks_a_run(gateway):
-    mcp, _, _ = gateway
-    requests: list[httpx2.Request] = []
-    reported = {"current_model_id": "openai/gpt-5.5"}
-
-    def handler(request: httpx2.Request) -> httpx2.Response:
-        requests.append(request)
-        if request.url.path == f"/api/conversations/{CONVERSATION}":
-            return httpx2.Response(
-                200,
-                json={
-                    "id": CONVERSATION,
-                    "tags": {"kulerepo": REPOSITORY},
-                    "current_model_id": reported["current_model_id"],
-                },
-            )
-        return httpx2.Response(200, json={"ok": True})
-
-    async with httpx2.AsyncClient(
-        base_url=ORIGIN, transport=httpx2.MockTransport(handler)
-    ) as client:
-        openhands.mount(mcp, client=client)
-        async with Client(mcp) as caller:
-            with pytest.raises(ToolError, match="effective model is not approved"):
-                await caller.call_tool(
-                    "oh_run_conversation",
-                    {"repository": REPOSITORY, "conversation_id": CONVERSATION},
-                )
-            with pytest.raises(ToolError, match="effective model is not approved"):
-                await caller.call_tool(
-                    "oh_send_message",
-                    {
-                        "repository": REPOSITORY,
-                        "conversation_id": CONVERSATION,
-                        "content": [{"type": "text", "text": "run"}],
-                        "run": True,
-                    },
-                )
-            # A non-running message is allowed so a caller can still inspect
-            # and switch the conversation first.
-            reported["current_model_id"] = None
-            await caller.call_tool(
-                "oh_send_message",
-                {
-                    "repository": REPOSITORY,
-                    "conversation_id": CONVERSATION,
-                    "content": [{"type": "text", "text": "queued"}],
-                    "run": False,
-                },
-            )
-
-    run_posts = [
-        request
-        for request in requests
-        if request.method == "POST"
-        and (
-            request.url.path.endswith("/run")
-            or (request.url.path.endswith("/events") and json.loads(request.content)["run"] is True)
-        )
-    ]
-    assert run_posts == []
-
-
 async def test_start_fails_closed_when_the_effective_model_is_not_verified(gateway):
     mcp, _, _ = gateway
     requests: list[httpx2.Request] = []

@@ -943,9 +943,7 @@ class _TargetGuard(Middleware):
                 message["run"] = arguments["run"]
             if _message_size(message) is None:
                 raise AuthorizationError("OpenHands message is not permitted")
-            await self._verify_repository(
-                repository, conversation_id, require_model=arguments.get("run") is True
-            )
+            await self._verify_repository(repository, conversation_id)
         elif name == "switch_acp_model":
             repository, conversation_id = self._scope(
                 arguments, {"repository", "conversation_id", "model"}
@@ -1016,7 +1014,7 @@ class _TargetGuard(Middleware):
             await self._verify_repository(repository, conversation_id)
         elif name == "run_conversation":
             repository, conversation_id = self._scope(arguments, {"repository", "conversation_id"})
-            await self._verify_repository(repository, conversation_id, require_model=True)
+            await self._verify_repository(repository, conversation_id)
         elif name in {
             "get_conversation",
             "get_conversation_runtime",
@@ -1129,9 +1127,7 @@ class _TargetGuard(Middleware):
         conversation_id = _conversation_id(arguments.get("conversation_id"))
         return repository, conversation_id
 
-    async def _verify_repository(
-        self, repository: str, conversation_id: str, *, require_model: bool = False
-    ) -> dict[str, Any]:
+    async def _verify_repository(self, repository: str, conversation_id: str) -> dict[str, Any]:
         """Verify the native kulerepo tag before any direct conversation action."""
         try:
             response = await self.client.get(f"/api/conversations/{conversation_id}")
@@ -1148,13 +1144,6 @@ class _TargetGuard(Middleware):
         tags = conversation.get("tags")
         if not isinstance(tags, dict) or tags.get("kulerepo") != repository:
             raise AuthorizationError("OpenHands conversation is outside the requested repository")
-        if require_model and conversation.get("current_model_id") not in _ALLOWED_MODELS:
-            # A run is refused unless Canvas reports one of the approved models
-            # as the effective model of this conversation.
-            raise AuthorizationError(
-                "OpenHands effective model is not approved for a run; "
-                "switch to an approved model and verify it first"
-            )
         return conversation
 
     async def _verified_start(self, result: ToolResult, model: str) -> ToolResult:

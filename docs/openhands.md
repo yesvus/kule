@@ -214,8 +214,9 @@ the cooperative alternative.
   UUIDs, the exact repository path, worktree option shape, text-only messages, numeric
   bounds, profile presence, the allowlisted explicit model and effort identifier
   syntax before any action. It applies the bounded iteration default and cap. Direct-ID
-  actions also verify the native `kulerepo` tag with a read-only preflight; a run
-  additionally requires an allowlisted server-reported effective model.
+  actions also verify the native `kulerepo` tag with a read-only preflight. Blocking
+  runs of conversations whose model is not allowlisted is out of scope here; Sluice
+  is expected to own that policy later.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
   does not create a client or contact Canvas; it validates the CA bundle when set.
@@ -275,7 +276,7 @@ A session dispatcher can use only these tools:
 4. `oh_send_message(repository, ..., run: false)` followed by
    `oh_run_conversation(repository, ...)` when the task must start only after
    verification. `oh_send_message(..., run: true)` is a single-call alternative.
-   Both run paths are refused unless the effective model is allowlisted. If
+   Run paths do not re-check the model; only launch and switch are gated. If
    Canvas saves the message but rate-limits the run, the MCP caller receives a
    FastMCP tool error with `Rate limited by upstream API, please retry later`, not a
    `429` tool status. The message is already saved in that case: back off and retry
