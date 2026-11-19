@@ -29,9 +29,10 @@ FastMCP 4.2.0 `FastMCP.from_openapi()` and reduces the upstream schema before mo
 | Setting | Requirement |
 | --- | --- |
 | `KULE_OPENHANDS_ENABLED` | Must be exactly `1`; default off. |
-| `KULE_OPENHANDS_API_URL` | One fixed **HTTPS** origin, optional port, no path/query/userinfo. |
-| `KULE_OPENHANDS_API_KEY` | Dedicated Canvas service key, sent only as `X-Session-API-Key`. Never a browser cookie or shared operator credential. |
-| `KULE_OPENHANDS_CA_FILE` | Optional absolute path to a readable public CA PEM bundle for the configured HTTPS listener. Required for the planned private-CA Tezgah listener. If unset, normal client TLS trust applies; if set but invalid, startup and `check-config` fail closed when the adapter is enabled. |
+| `KULE_OPENHANDS_API_URL` | One fixed **HTTPS** origin, optional port, no path/query/userinfo. Plain `http://` is permitted only when `KULE_OPENHANDS_ALLOW_CLUSTER_HTTP=1` and the host is loopback or `<service>.<namespace>.svc[.cluster.local]`. |
+| `KULE_OPENHANDS_ALLOW_CLUSTER_HTTP` | Optional; set to `1` to opt into plain `http://` only for loopback or `<service>.<namespace>.svc[.cluster.local]` NetworkPolicy-isolated cluster origins. Default off. |
+| `KULE_OPENHANDS_API_KEY` | Dedicated Canvas service key, sent only as `X-Session-API-Key`. Required for HTTPS origins; optional only for opted-in cluster-local `http://` origins (inbound caller `X-Session-API-Key` headers are still stripped). Never a browser cookie or shared operator credential. |
+| `KULE_OPENHANDS_CA_FILE` | Optional absolute path to a readable public CA PEM bundle for the configured HTTPS listener. Rejected if paired with an `http://` origin. If unset, normal client TLS trust applies; if set but invalid, startup and `check-config` fail closed when the adapter is enabled. |
 | `KULE_OPENHANDS_REPOSITORIES` | JSON object mapping each approved canonical `owner/name` to its exact Canvas source path, for example `{"yesvus/kule":"/workspace/src/kule"}`. Required; 1–64 entries; no path root, `..`, duplicate name or duplicate path. |
 
 The HTTP client pins the origin, disables redirects and ignores proxy environment
@@ -40,12 +41,14 @@ host. The key is never a tool argument and is not written to the audit log.
 An explicit CA bundle is loaded into an integration-local SSLContext with certificate
 and hostname verification enabled; other Kule clients are unchanged. Mount only the
 public CA, never its signing key. Do not rely on `SSL_CERT_FILE` or disable TLS
-verification.
+verification. `KULE_OPENHANDS_CA_FILE` is rejected if paired with an `http://` origin.
 
-The native Canvas listener is currently plain HTTP on port 8000. This adapter rejects
-`http://` because that would send the service key in cleartext. Enabling it in a Pod
-requires a reviewed TLS ingress or local TLS terminator; that is a live-rollout gate,
-not part of this source change.
+By default this adapter requires `https://` so a service key is never sent in
+cleartext. For same-cluster NetworkPolicy-isolated communication to a cluster-local
+Canvas HTTP service (for example `http://canvas.openhands.svc.cluster.local:8000`),
+set `KULE_OPENHANDS_ALLOW_CLUSTER_HTTP=1`; `KULE_OPENHANDS_API_KEY` may then be
+omitted when the upstream service relies on NetworkPolicy isolation rather than a
+service key. External or non-cluster HTTP origins remain rejected.
 
 ## Endpoint allowlist
 
@@ -198,9 +201,11 @@ the cooperative alternative.
   any action. Direct-ID actions also verify the native `kulerepo` tag with a read-only
   preflight.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
-  when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
-  does not create a client or contact Canvas; it validates the CA bundle when set.
-  When the adapter is disabled, none of those settings are required.
+  when `KULE_OPENHANDS_ENABLED=1`: repository map, origin (HTTPS or opted-in
+  cluster-local HTTP) and service key (required for HTTPS, optional for opted-in
+  cluster-local HTTP). It does not create a client or contact Canvas; it validates
+  the CA bundle when set and rejects `KULE_OPENHANDS_CA_FILE` when paired with an
+  `http://` origin. When the adapter is disabled, none of those settings are required.
 - Conversation responses (`oh_start_conversation`, `oh_get_conversation` and
   `oh_list_conversations` items) are projected onto the safe lifecycle schema described
   above. Other Canvas response types are returned as their native summary or event

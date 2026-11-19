@@ -1337,3 +1337,184 @@ async def test_outsider_sees_no_openhands_tools(gateway):
                 await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
     records = [json.loads(line) for line in Path(audit).read_text().splitlines()]
     assert records[-1]["event"] == "denied"
+
+
+def test_cluster_http_origin_opt_in_and_strict_host_allowlist():
+    for blocked in (
+        "http://canvas.openhands.svc.cluster.local:8000",
+        "http://127.0.0.1:8000",
+    ):
+        with pytest.raises(RuntimeError, match="HTTPS origin"):
+            openhands._origin(blocked)
+
+    for allowed, expected in (
+        (
+            "http://canvas.openhands.svc.cluster.local:8000/",
+            "http://canvas.openhands.svc.cluster.local:8000",
+        ),
+        ("http://canvas.openhands.svc:8000", "http://canvas.openhands.svc:8000"),
+        ("http://127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("http://localhost:8000", "http://localhost:8000"),
+        ("http://[::1]:8000", "http://[::1]:8000"),
+        ("https://canvas.example.test:8000", "https://canvas.example.test:8000"),
+    ):
+        assert openhands._origin(allowed, allow_cluster_http=True) == expected
+
+    for unsafe in (
+        "http://canvas.example.test:8000",
+        "http://192.0.2.10:8000",
+        "http://svc.cluster.local:8000",
+        "http://canvas.svc.cluster.local:8000",
+        "http://a.b.c.svc.cluster.local:8000",
+        "http://canvas.openhands.svc.cluster.local.attacker.example:8000",
+        "http://canvas.openhands.svc.cluster.local.:8000",
+        "http://-bad.openhands.svc.cluster.local:8000",
+        "http://canvas.openhands.svc.cluster.local/api",
+        "http://user:pass@canvas.openhands.svc.cluster.local:8000",
+    ):
+        with pytest.raises(RuntimeError, match="cluster-local HTTP"):
+            openhands._origin(unsafe, allow_cluster_http=True)
+
+
+def test_cluster_http_optional_api_key_and_ca_rejection(tmp_path, monkeypatch, capsys):
+    import certifi
+
+    from operator_mcp.cli import main
+
+    repos = json.dumps({REPOSITORY: "/workspace/src/kule"})
+    cluster_origin = "http://canvas.openhands.svc.cluster.local:8000"
+    base_env = {
+        "KULE_OPENHANDS_REPOSITORIES": repos,
+        "KULE_OPENHANDS_ALLOW_CLUSTER_HTTP": "1",
+        "KULE_OPENHANDS_API_URL": cluster_origin,
+    }
+    assert openhands.settings_from_env(base_env) == (
+        {REPOSITORY: "/workspace/src/kule"},
+        cluster_origin,
+        None,
+    )
+    assert openhands.settings_from_env(
+        {**base_env, "KULE_OPENHANDS_API_KEY": "dedicated-service-key"}
+    ) == (
+        {REPOSITORY: "/workspace/src/kule"},
+        cluster_origin,
+        "dedicated-service-key",
+    )
+
+    secret = "must-not-appear-in-an-error"
+    for bad_key in (f" {secret}", f"{secret}\n"):
+        with pytest.raises(RuntimeError, match="missing or malformed") as err:
+            openhands.settings_from_env({**base_env, "KULE_OPENHANDS_API_KEY": bad_key})
+        assert secret not in str(err.value)
+
+    with pytest.raises(RuntimeError, match="missing or malformed"):
+        openhands.settings_from_env(
+            {
+                "KULE_OPENHANDS_REPOSITORIES": repos,
+                "KULE_OPENHANDS_ALLOW_CLUSTER_HTTP": "1",
+                "KULE_OPENHANDS_API_URL": ORIGIN,
+            }
+        )
+
+    with pytest.raises(RuntimeError, match="KULE_OPENHANDS_CA_FILE requires an HTTPS origin"):
+        openhands.validate_settings({**base_env, "KULE_OPENHANDS_CA_FILE": certifi.where()})
+
+    config = tmp_path / "config.toml"
+    config.write_text(
+        """
+[server]
+public_url = "https://mcp.example.com"
+[auth]
+oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
+client_id = "client"
+"""
+    )
+    monkeypatch.setenv("OPERATOR_MCP_OIDC_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("OPERATOR_MCP_JWT_SIGNING_KEY", "k" * 32)
+    monkeypatch.setenv("KULE_OPENHANDS_ENABLED", "1")
+    monkeypatch.setenv("KULE_OPENHANDS_ALLOW_CLUSTER_HTTP", "1")
+    monkeypatch.setenv("KULE_OPENHANDS_REPOSITORIES", repos)
+    monkeypatch.setenv("KULE_OPENHANDS_API_URL", cluster_origin)
+    monkeypatch.delenv("KULE_OPENHANDS_API_KEY", raising=False)
+    monkeypatch.delenv("KULE_OPENHANDS_CA_FILE", raising=False)
+    assert main(["check-config", "--config", str(config)]) == 0
+    assert "config ok" in capsys.readouterr().out
+
+
+async def test_cluster_http_mount_omits_api_key_strips_inbound_key_and_supports_cursors(
+    gateway, monkeypatch
+):
+    from urllib.parse import parse_qs, urlsplit
+
+    mcp, _, _ = gateway
+    seen_headers: list[dict[str, str]] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            seen_headers.append({k.lower(): v for k, v in self.headers.items()})
+            parsed = urlsplit(self.path)
+            if parsed.path == "/api/agent-profiles":
+                payload = {"profiles": [{"id": PROFILE, "name": "default"}]}
+            elif parsed.path == "/api/conversations/search":
+                page = parse_qs(parsed.query).get("page_id", [None])[0]
+                if page is None:
+                    payload = {
+                        "items": [{"id": CONVERSATION, "tags": {"kulerepo": REPOSITORY}}],
+                        "next_page_id": SECOND_CONVERSATION,
+                    }
+                elif page == uuid.UUID(SECOND_CONVERSATION).hex:
+                    payload = {
+                        "items": [{"id": SECOND_CONVERSATION, "tags": {"kulerepo": REPOSITORY}}],
+                        "next_page_id": None,
+                    }
+                else:
+                    payload = {"items": [], "next_page_id": None}
+            else:
+                payload = {"ok": True}
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    origin = f"http://127.0.0.1:{server.server_address[1]}"
+    monkeypatch.setenv("KULE_OPENHANDS_ALLOW_CLUSTER_HTTP", "1")
+    monkeypatch.setenv("KULE_OPENHANDS_API_URL", origin)
+    monkeypatch.delenv("KULE_OPENHANDS_API_KEY", raising=False)
+    monkeypatch.delenv("KULE_OPENHANDS_CA_FILE", raising=False)
+    try:
+        openhands.mount(mcp)
+        async with Client(mcp) as caller:
+            profiles = await caller.call_tool("oh_list_agent_profiles", {})
+            assert profiles.data == {"profiles": [{"id": PROFILE, "name": "default"}]}
+
+            page1 = await caller.call_tool("oh_list_conversations", {"repository": REPOSITORY})
+            assert [item["id"] for item in page1.data["items"]] == [CONVERSATION]
+            cursor = page1.data["next_page_id"]
+            assert isinstance(cursor, str) and cursor.startswith("gc1.")
+
+            page2 = await caller.call_tool(
+                "oh_list_conversations", {"repository": REPOSITORY, "page_id": cursor}
+            )
+            assert [item["id"] for item in page2.data["items"]] == [SECOND_CONVERSATION]
+            assert page2.data["next_page_id"] is None
+
+        async with openhands._ScopedClient(base_url=origin, api_key=None, timeout=5) as scoped:
+            response = await scoped.get(
+                "/api/agent-profiles",
+                headers={"X-Session-API-Key": "caller-controlled-key"},
+            )
+            assert response.status_code == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(seen_headers) == 4
+    assert all("x-session-api-key" not in headers for headers in seen_headers)
