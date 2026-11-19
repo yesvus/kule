@@ -59,6 +59,8 @@ existing operator group; untagged tools fail closed.
 | `oh_get_conversation_runtime` | `GET /api/conversations/{id}/runtime` | read |
 | `oh_search_events` | `GET /api/conversations/{id}/events/search` | read |
 | `oh_get_event` | `GET /api/conversations/{id}/events/{event_id}` | read |
+| `oh_count_events` | `GET /api/conversations/{id}/events/count` | read |
+| `oh_get_final_response` | `GET /api/conversations/{id}/agent_final_response` | read |
 | `oh_list_agent_profiles` | `GET /api/agent-profiles` | read |
 | `oh_start_conversation` | `POST /api/conversations` | operate |
 | `oh_rename_conversation` | `PATCH /api/conversations/{id}` | operate |
@@ -103,10 +105,11 @@ has no repository filter, so this cannot be passed upstream:
   (`CREATED_AT`/`CREATED_AT_DESC`, the default). Updated-time ordering is rejected
   because a rename can move an already-scanned conversation and skip an unread one.
   `oh_list_conversations` advertises only the stable creation-order values.
-- Direct-ID reads and actions (`get`, runtime, events, event, send message, rename,
-  run, interrupt, pause, model switch, effort switch) require `repository` and first
-  read the native conversation tags. A missing tag, a different tag, or an unverifiable preflight is
-  denied before the requested action. There is no unscoped ID bypass.
+- Direct-ID reads and actions (`get`, runtime, events, event, count, final response,
+  send message, rename, run, interrupt, pause, model switch, effort switch) require
+  `repository` and first read the native conversation tags. A missing tag, a different
+  tag, or an unverifiable preflight is denied before the requested action. There is no
+  unscoped ID bypass.
 - `oh_search_events` keeps the native event filters (`kind`, `source`, `body`,
   `sort_order`, `timestamp__gte`, `timestamp__lt`) and bounded `limit`/`page_id`
   because every event belongs to the already-verified conversation.
@@ -123,7 +126,9 @@ Conversation responses (`oh_start_conversation`, `oh_get_conversation` and the i
 returned by `oh_list_conversations`) are projected to lifecycle fields before leaving
 the gateway: ID, title, `execution_status`, timestamps, tags, `working_dir`/workspace
 kind, iteration and budget limits, current/available model metadata, metrics and the
-launched profile ID. Canvas's `ConversationInfo`
+launched profile ID. `oh_start_conversation` additionally returns `effective_model`
+and `model_verified: true` after the native model switch and verification succeed.
+Canvas's `ConversationInfo`
 also carries the secret registry, hook definitions, agent settings and state,
 blocked-action messages and a remote workspace API key; those fields are dropped even
 if a future Canvas version adds them to the response. `launched_agent_profile` is
@@ -151,17 +156,27 @@ treated as sensitive operator content.
 
 - `repository` — required canonical `owner/name`; must be present in the approved
   mapping and is enforced as `kulerepo`;
+- `model` — required exact ACP model from the reviewed allowlist
+  (`opencode-go/deepseek-v4.1-flash`, `opencode-go/mimo-v2.6-flash`). It is a
+  Kule-only argument: the conversation is created idle, switched with the native
+  `switch_acp_model` operation, and the server-reported effective model is verified
+  before the tool returns. A conversation whose effective model cannot be verified is
+  left idle and must not be run. Adding a model to the allowlist is a reviewed code
+  change, never a caller override;
 - `workspace: {working_dir}` — required, normalized, and required to equal the exact
   approved path for that repository; a sibling, parent or subdirectory is rejected;
 - `worktree` and `worktree_options` (`base`, `ref`, `branch_prefix`) — native Canvas
   worktree lifecycle, used instead of a second worktree manager;
 - `initial_message` — text-only, at most 32 blocks, 32 KiB per block, 64 KiB total.
-  Omit it when the dispatcher must verify the worktree first: Canvas can persist and
-  run the message before it returns the conversation ID;
+  It must not set `run: true`: Canvas can persist and start the message before the
+  tool returns the conversation ID, which would run the profile default before the
+  requested model is verified. Send work with `oh_send_message` after the tool
+  returns `model_verified: true`;
 - `agent_profile_id` — required Canvas profile UUID; resolve it from
   `oh_list_agent_profiles`;
-- `max_iterations` (1–1000), `max_budget_per_run` (positive and at most 1000 USD),
-  `tags`, `autotitle`.
+- `max_iterations` (1–100; default 50 when omitted), `max_budget_per_run` (positive
+  and at most 1000 USD), `tags`, `autotitle`. The bounded default prevents an omitted
+  value from falling back to Canvas's larger default.
 
 The adapter deliberately removes `secrets`, `secrets_encrypted`, `agent_settings`,
 `agent_launch_additions`, `tool_module_qualnames`, `client_tools`, `hook_config`,
@@ -171,10 +186,13 @@ header parameters. This excludes arbitrary ACP commands/arguments, shell hooks,
 secret references, dynamic Python imports and privileged profile configuration.
 
 `oh_send_message` is text-only and cannot set `role`; messages are always user
-messages. `oh_switch_acp_model` changes only one ACP conversation's model, not a
-stored profile. `oh_rename_conversation` accepts only `title` (1–200 characters); it
-cannot rewrite tags, budgets or other metadata. Unknown or extra arguments fail
-closed rather than being silently dropped.
+messages. A message that sets `run: true`, and `oh_run_conversation`, are refused
+unless Canvas reports an allowlisted `current_model_id` for that conversation. A
+caller can therefore queue a message with `run: false`, switch the model, and retry.
+`oh_switch_acp_model` accepts only an exact allowlisted model ID and changes one ACP
+conversation's model, not a stored profile. `oh_rename_conversation` accepts only
+`title` (1–200 characters); it cannot rewrite tags, budgets or other metadata.
+Unknown or extra arguments fail closed rather than being silently dropped.
 
 FastMCP merges inbound MCP HTTP headers into the outbound Canvas request. The adapter
 therefore sends only a fixed header allowlist of normal transport headers, rebuilds
@@ -194,9 +212,10 @@ the cooperative alternative.
   `read` and `operate` tags are assigned from the allowlist, not from caller input.
 - A call-time target guard validates the approved repository mapping, conversation
   UUIDs, the exact repository path, worktree option shape, text-only messages, numeric
-  bounds, profile presence, model identifier syntax and effort identifier syntax before
-  any action. Direct-ID actions also verify the native `kulerepo` tag with a read-only
-  preflight.
+  bounds, profile presence, the allowlisted explicit model and effort identifier
+  syntax before any action. It applies the bounded iteration default and cap. Direct-ID
+  actions also verify the native `kulerepo` tag with a read-only preflight; a run
+  additionally requires an allowlisted server-reported effective model.
 - `operator-mcp check-config` validates the same enabled Canvas settings as `mount`
   when `KULE_OPENHANDS_ENABLED=1`: repository map, HTTPS origin and service key. It
   does not create a client or contact Canvas; it validates the CA bundle when set.
@@ -231,34 +250,39 @@ A session dispatcher can use only these tools:
    `current_model_id`/`available_models` after start, or an owner-approved
    profile-to-model mapping). If neither is available, stop dispatch. Do not silently
    substitute a paid model.
-2. `oh_start_conversation` with `repository`, `workspace.working_dir` set to that
-   repository's exact approved path, `worktree: true`, the task branch prefix (for
-   example `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and the session's
-   `kuleissue`/`kuletask`/`kulemodel` tags as appropriate. Omit `initial_message`
-   whenever a preflight check is required: Canvas persists an initial message and can
-   start the agent before returning the conversation ID, so verification would happen
-   too late. The response returns the real native conversation ID. Verify the
-   returned workspace path and runtime availability with `oh_get_conversation` /
-   `oh_get_conversation_runtime`; a conversation ID alone does not prove the worktree
-   was created. Those tools do **not** report the Git branch, so branch verification
-   is a prerequisite this adapter cannot satisfy. Verify the branch through a
-   separately approved native source before sending work, or keep the session idle.
-   If verification fails, stop the session; do not fall back to the source checkout.
-3. If an exact per-conversation model override is required,
-   `oh_switch_acp_model(repository, conversation_id, model)` with the verified catalog
-   ID. The stored profile is unchanged. If a distinct reasoning effort is required,
-   call `oh_switch_acp_effort(repository, conversation_id, effort)` with the exact
+2. `oh_start_conversation` with `repository`, the exact allowlisted `model`,
+   `workspace.working_dir` set to that repository's exact approved path,
+   `worktree: true`, the task branch prefix (for example
+   `oh23/ws-oh-workers/`), the resolved `agent_profile_id`, and the session's
+   `kuleissue`/`kuletask` tags as appropriate. Omit `initial_message` when the
+   dispatcher must verify the worktree first, and never set `run: true` on it.
+   Kule creates the conversation idle, switches it to the requested model through
+   the native ACP operation, and returns the conversation ID with
+   `model_verified: true` and the effective model. Verify the returned workspace
+   path and runtime availability with `oh_get_conversation` /
+   `oh_get_conversation_runtime`; a conversation ID alone does not prove the
+   worktree was created. Those tools do **not** report the Git branch, so branch
+   verification is a prerequisite this adapter cannot satisfy. Verify the branch
+   through a separately approved native source before sending work, or keep the
+   session idle. If verification fails, stop the session; do not fall back to the
+   source checkout.
+3. If a distinct reasoning effort is required, call
+   `oh_switch_acp_effort(repository, conversation_id, effort)` with the exact
    server-reported or separately verified value (for example `high`), and re-read
-   session metadata before dispatch. Do not substitute a different effort silently.
+   session metadata before dispatch. An explicit model override is the
+   `oh_switch_acp_model` tool, restricted to the same allowlist; the stored profile
+   is unchanged. Do not substitute a different effort or model silently.
 4. `oh_send_message(repository, ..., run: false)` followed by
    `oh_run_conversation(repository, ...)` when the task must start only after
-   verification. `oh_send_message(..., run: true)` is a single-call alternative. If
+   verification. `oh_send_message(..., run: true)` is a single-call alternative.
+   Both run paths are refused unless the effective model is allowlisted. If
    Canvas saves the message but rate-limits the run, the MCP caller receives a
    FastMCP tool error with `Rate limited by upstream API, please retry later`, not a
    `429` tool status. The message is already saved in that case: back off and retry
    only `oh_run_conversation` on the same conversation. Do not resend the message.
-5. Poll `oh_get_conversation`, `oh_get_conversation_runtime` and `oh_search_events`
-   with `repository` for status, failures and the final report. Use
+5. Poll `oh_get_conversation`, `oh_get_conversation_runtime`, `oh_search_events`
+   and `oh_count_events` with `repository` for status, failures and event volume,
+   and read `oh_get_final_response` for the agent's final text. Use
    `oh_list_conversations(repository, ...)` with bounded `limit`, creation-order
    sorting and the encrypted `page_id` cursor for discovery. Reuse native
    conversation state; do not persist a duplicate conversation database.

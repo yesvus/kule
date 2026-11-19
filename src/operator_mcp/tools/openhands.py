@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 import httpx2
 from fastmcp import FastMCP
-from fastmcp.exceptions import AuthorizationError
+from fastmcp.exceptions import AuthorizationError, ToolError
 from fastmcp.server.middleware import Middleware
 from fastmcp.server.providers.openapi import MCPType
 from fastmcp.tools.base import ToolResult
@@ -54,6 +54,16 @@ _MAX_MESSAGE_BLOCKS = 32
 _MAX_MESSAGE_BYTES = 32 * 1024
 _MAX_MESSAGE_TOTAL_BYTES = 64 * 1024
 _MAX_BUDGET_PER_RUN = 1000.0
+# Owner-approved subagent models (ops#1156 comment 7015997064). A model outside
+# this set is denied, and every run must report one of them as the effective
+# model. Adding a model is a reviewed code change, never a caller argument.
+_ALLOWED_MODELS = (
+    "opencode-go/deepseek-v4.1-flash",
+    "opencode-go/mimo-v2.6-flash",
+)
+# A single agent run stays bounded even when the caller omits the limit.
+_MAX_ITERATIONS = 100
+_DEFAULT_ITERATIONS = 50
 _MAX_LIST_PAGES = 5
 _CURSOR_PREFIX = "gc1."
 _CURSOR_NONCE_BYTES = 12
@@ -173,6 +183,32 @@ _ENDPOINTS: dict[str, _Endpoint] = {
         "/api/conversations/{conversation_id}/events/{event_id}",
         frozenset({"conversation_id", "event_id"}),
     ),
+    "count_conversation_events_api_conversations__conversation_id__events_count_get": _Endpoint(
+        "count_events",
+        READ,
+        "get",
+        "/api/conversations/{conversation_id}/events/count",
+        frozenset(
+            {
+                "conversation_id",
+                "kind",
+                "source",
+                "body",
+                "timestamp__gte",
+                "timestamp__lt",
+            }
+        ),
+    ),
+    (
+        "get_conversation_agent_final_response_api_conversations__"
+        "conversation_id__agent_final_response_get"
+    ): _Endpoint(
+        "get_final_response",
+        READ,
+        "get",
+        "/api/conversations/{conversation_id}/agent_final_response",
+        frozenset({"conversation_id"}),
+    ),
     "list_agent_profiles_api_agent_profiles_get": _Endpoint(
         "list_agent_profiles",
         READ,
@@ -235,7 +271,6 @@ _ENDPOINTS: dict[str, _Endpoint] = {
 
 _START_FIELDS = frozenset(
     {
-        "repository",
         "workspace",
         "worktree",
         "worktree_options",
@@ -247,6 +282,10 @@ _START_FIELDS = frozenset(
         "autotitle",
     }
 )
+# Kule-only launch arguments. `repository` becomes the native kulerepo tag and
+# `model` is applied and verified through the native ACP model switch; neither
+# is a Canvas StartConversationRequest field.
+_KULE_START_FIELDS = frozenset({"repository", "model"})
 _AUDIT_FIELDS = frozenset(
     {
         "repository",
@@ -451,9 +490,11 @@ def _restrict_schemas(schemas: dict[str, Any]) -> None:
         "title": profile.get("title", "Agent Profile Id"),
         "description": profile.get("description", ""),
     }
-    # Keep the native worktree lifecycle, but cap a single agent run.
+    # Keep the native worktree lifecycle, but cap a single agent run and apply
+    # the same default when the caller omits the limit.
     iterations = start["properties"].get("max_iterations", {})
-    iterations["maximum"] = 1000
+    iterations["maximum"] = _MAX_ITERATIONS
+    iterations["default"] = _DEFAULT_ITERATIONS
     budget = start["properties"].get("max_budget_per_run", {})
     for option in budget.get("anyOf", []):
         if isinstance(option, dict) and option.get("type") == "number":
@@ -535,6 +576,20 @@ def _component(route: Any, component: Any) -> None:
     required = list(component.parameters.get("required") or [])
     if "repository" not in required:
         required.append("repository")
+    if endpoint.tool == "start_conversation":
+        # The requested model is applied through the native ACP switch and
+        # verified against the server-reported effective model before any run.
+        properties["model"] = {
+            "type": "string",
+            "enum": list(_ALLOWED_MODELS),
+            "title": "Model",
+            "description": (
+                "Exact allowlisted ACP model. Kule switches the idle conversation "
+                "to it and verifies the effective model before the session may run."
+            ),
+        }
+        if "model" not in required:
+            required.append("model")
     component.parameters["required"] = required
 
 
@@ -845,10 +900,12 @@ class _TargetGuard(Middleware):
         name = context.message.name
         arguments = dict(context.message.arguments or {})
         repository: str | None = None
+        model: str | None = None
         cursor_native: str | None = None
 
         if name == "start_conversation":
             self._start(arguments)
+            model = arguments.pop("model")
             repository = self._repository(arguments.pop("repository"))
             tags = dict(arguments.get("tags") or {})
             tags["kulerepo"] = repository
@@ -886,14 +943,18 @@ class _TargetGuard(Middleware):
                 message["run"] = arguments["run"]
             if _message_size(message) is None:
                 raise AuthorizationError("OpenHands message is not permitted")
-            await self._verify_repository(repository, conversation_id)
+            await self._verify_repository(
+                repository, conversation_id, require_model=arguments.get("run") is True
+            )
         elif name == "switch_acp_model":
             repository, conversation_id = self._scope(
                 arguments, {"repository", "conversation_id", "model"}
             )
-            model = arguments.get("model")
-            if not isinstance(model, str) or not _MODEL.fullmatch(model):
+            requested = arguments.get("model")
+            if not isinstance(requested, str) or not _MODEL.fullmatch(requested):
                 raise AuthorizationError("OpenHands model identifier is not permitted")
+            if requested not in _ALLOWED_MODELS:
+                raise AuthorizationError("OpenHands model is not approved")
             await self._verify_repository(repository, conversation_id)
         elif name == "switch_acp_effort":
             repository, conversation_id = self._scope(
@@ -939,10 +1000,27 @@ class _TargetGuard(Middleware):
             )
             self._pagination(arguments)
             await self._verify_repository(repository, conversation_id)
+        elif name == "count_events":
+            repository, conversation_id = self._scope(
+                arguments,
+                {
+                    "repository",
+                    "conversation_id",
+                    "kind",
+                    "source",
+                    "body",
+                    "timestamp__gte",
+                    "timestamp__lt",
+                },
+            )
+            await self._verify_repository(repository, conversation_id)
+        elif name == "run_conversation":
+            repository, conversation_id = self._scope(arguments, {"repository", "conversation_id"})
+            await self._verify_repository(repository, conversation_id, require_model=True)
         elif name in {
             "get_conversation",
             "get_conversation_runtime",
-            "run_conversation",
+            "get_final_response",
             "interrupt_conversation",
             "pause_conversation",
         }:
@@ -953,6 +1031,8 @@ class _TargetGuard(Middleware):
         result = await call_next(context)
         if name == "list_conversations":
             return await self._list_repository(result, repository, cursor_native, arguments)
+        if name == "start_conversation":
+            return await self._verified_start(result, model)
         return _project_result(name, result)
 
     async def _list_repository(
@@ -1049,7 +1129,9 @@ class _TargetGuard(Middleware):
         conversation_id = _conversation_id(arguments.get("conversation_id"))
         return repository, conversation_id
 
-    async def _verify_repository(self, repository: str, conversation_id: str) -> None:
+    async def _verify_repository(
+        self, repository: str, conversation_id: str, *, require_model: bool = False
+    ) -> dict[str, Any]:
         """Verify the native kulerepo tag before any direct conversation action."""
         try:
             response = await self.client.get(f"/api/conversations/{conversation_id}")
@@ -1066,9 +1148,80 @@ class _TargetGuard(Middleware):
         tags = conversation.get("tags")
         if not isinstance(tags, dict) or tags.get("kulerepo") != repository:
             raise AuthorizationError("OpenHands conversation is outside the requested repository")
+        if require_model and conversation.get("current_model_id") not in _ALLOWED_MODELS:
+            # A run is refused unless Canvas reports one of the approved models
+            # as the effective model of this conversation.
+            raise AuthorizationError(
+                "OpenHands effective model is not approved for a run; "
+                "switch to an approved model and verify it first"
+            )
+        return conversation
+
+    async def _verified_start(self, result: ToolResult, model: str) -> ToolResult:
+        """Switch an idle conversation to the requested model and verify it.
+
+        Canvas accepts a pre-run model switch without a live ACP round-trip, so
+        the server-reported effective model is the only trustworthy value. A
+        session that cannot be verified is left idle and never run.
+        """
+        data = result.structured_content
+        if not isinstance(data, dict) or not isinstance(data.get("id"), str):
+            raise ToolError("OpenHands start response has no conversation ID")
+        conversation_id = _conversation_id(data["id"])
+
+        try:
+            switched = await self.client.post(
+                f"/api/conversations/{conversation_id}/switch_acp_model",
+                json={"model": model},
+            )
+        except httpx2.HTTPError:
+            switched = None
+        if switched is None or switched.status_code != 200:
+            raise ToolError(
+                f"OpenHands model switch failed for conversation {conversation_id}; "
+                "the conversation is idle and must not be run"
+            )
+
+        try:
+            response = await self.client.get(f"/api/conversations/{conversation_id}")
+        except httpx2.HTTPError:
+            response = None
+        if response is None or response.status_code != 200:
+            raise ToolError(
+                f"OpenHands effective model is not verified for conversation {conversation_id}; "
+                "the conversation is idle and must not be run"
+            )
+        try:
+            conversation = response.json()
+        except ValueError:
+            conversation = None
+
+        offered: set[str] | None = None
+        models = conversation.get("available_models") if isinstance(conversation, dict) else None
+        if isinstance(models, list) and models:
+            offered = {
+                item.get("model_id")
+                for item in models
+                if isinstance(item, dict) and isinstance(item.get("model_id"), str)
+            }
+        if (
+            not isinstance(conversation, dict)
+            or conversation.get("id") != conversation_id
+            or conversation.get("current_model_id") != model
+            or (offered is not None and model not in offered)
+        ):
+            raise ToolError(
+                f"OpenHands effective model is not verified for conversation {conversation_id}; "
+                "the conversation is idle and must not be run"
+            )
+
+        projected = _safe_conversation(conversation)
+        projected["effective_model"] = model
+        projected["model_verified"] = True
+        return ToolResult(structured_content=projected, meta=result.meta)
 
     def _start(self, arguments: dict[str, Any]) -> None:
-        if set(arguments) - _START_FIELDS:
+        if set(arguments) - _START_FIELDS - _KULE_START_FIELDS:
             raise AuthorizationError("OpenHands launch field is not permitted")
         repository = self._repository(arguments.get("repository"))
         workspace = arguments.get("workspace")
@@ -1094,6 +1247,11 @@ class _TargetGuard(Middleware):
         if arguments.get("initial_message") is not None:
             if _message_size(arguments["initial_message"]) is None:
                 raise AuthorizationError("OpenHands message is not permitted")
+            # The model is switched and verified after Canvas returns the
+            # conversation ID. A message that starts the agent would run on the
+            # profile default before that verification.
+            if arguments["initial_message"].get("run") is True:
+                raise AuthorizationError("OpenHands message must not run before model verification")
 
         profile = arguments.get("agent_profile_id")
         if not isinstance(profile, str) or not 1 <= len(profile) <= 200:
@@ -1108,9 +1266,13 @@ class _TargetGuard(Middleware):
             if (
                 isinstance(iterations, bool)
                 or not isinstance(iterations, int)
-                or not 1 <= iterations <= 1000
+                or not 1 <= iterations <= _MAX_ITERATIONS
             ):
                 raise AuthorizationError("OpenHands iteration limit is not permitted")
+        else:
+            # Apply the bounded default so an omitted value cannot fall back to
+            # Canvas's larger default.
+            arguments["max_iterations"] = _DEFAULT_ITERATIONS
         if arguments.get("max_budget_per_run") is not None:
             budget = arguments["max_budget_per_run"]
             if isinstance(budget, bool) or not isinstance(budget, int | float):
@@ -1141,6 +1303,12 @@ class _TargetGuard(Middleware):
             existing = tags.get("kulerepo")
             if existing is not None and existing.lower() != repository:
                 raise AuthorizationError("OpenHands repository tag is not permitted")
+
+        requested = arguments.get("model")
+        if requested is None:
+            raise AuthorizationError("OpenHands explicit model is required")
+        if not isinstance(requested, str) or requested not in _ALLOWED_MODELS:
+            raise AuthorizationError("OpenHands model is not approved")
 
 
 def _worktree_options(value: Any) -> bool:
