@@ -268,13 +268,11 @@ def test_config_rejects_bad_numbers_and_empty_paths(tmp_path, old, new, msg):
 
 
 def test_legacy_config_defaults_preserve_state_and_audit(tmp_path):
-    from kule.config import LEGACY_AUDIT_PATH, LEGACY_STATE_DIR
-
     cfg = load_config(write(tmp_path, GOOD), ENV)
-    assert cfg.server.state_dir == LEGACY_STATE_DIR
-    assert cfg.kill_switch_path == LEGACY_STATE_DIR / "DISABLED"
-    assert cfg.audit.path == LEGACY_AUDIT_PATH
-    assert cfg.tools.scratch_dir == LEGACY_STATE_DIR / "scratch"
+    assert cfg.server.state_dir == Path("/var/lib/operator-mcp")
+    assert cfg.kill_switch_path == Path("/var/lib/operator-mcp/DISABLED")
+    assert cfg.audit.path == Path("/var/log/operator-mcp/audit.jsonl")
+    assert cfg.tools.scratch_dir == Path("/var/lib/operator-mcp/scratch")
 
 
 def test_legacy_environment_credentials_remain_supported(tmp_path):

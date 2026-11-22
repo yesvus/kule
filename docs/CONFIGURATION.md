@@ -31,6 +31,6 @@ Host execution is disabled by default. For the current SSH backend, enabling it 
 
 The default state directory, audit path and scratch directory retain their previous on-disk locations until an explicit migration is performed. This preserves persisted OAuth sessions, audit continuity and any existing `DISABLED` emergency-stop marker. Do not move these paths just to rename the package; set new paths explicitly only after migrating their contents and confirming the kill switch remains effective.
 
-Existing `OPERATOR_MCP_OIDC_CLIENT_SECRET` and `OPERATOR_MCP_JWT_SIGNING_KEY` environment variables remain supported during the transition. The new `KULE_*` variables take effect for new installations; conflicting old/new values are rejected at startup. Existing deployments also require explicit updates to the executable name, container image, and config mount paths before adopting the new image.
+Existing `OPERATOR_MCP_OIDC_CLIENT_SECRET` and `OPERATOR_MCP_JWT_SIGNING_KEY` environment variables remain supported during the transition. The corresponding `KULE_*` variables are read on every installation and take precedence when set. If both names are set to different values, startup fails. Existing deployments also require explicit updates to the executable name, container image, and config mount paths before adopting the new image.
 
 Kule's public HTTP endpoint should normally bind to localhost behind a trusted TLS reverse proxy.

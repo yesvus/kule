@@ -4,13 +4,13 @@ Thanks for your interest in improving Kule.
 
 ## Development
 
-Kule uses Python 3.11+ and [FastMCP](https://gofastmcp.com/).
+Kule uses Python 3.11+ and [FastMCP](https://gofastmcp.com/). The development and test workflow currently supports Linux and macOS. On Windows, use **WSL** and follow the Linux commands; native Windows tests are not supported because the audit implementation uses Unix `fcntl`.
 
 ```sh
 git clone https://github.com/yesvus/kule.git
 cd kule
 python -m venv .venv
-. .venv/bin/activate  # Linux/macOS; on Windows PowerShell: .venv\\Scripts\\Activate.ps1
+. .venv/bin/activate
 python -m pip install -e '.[dev]'
 ruff check .
 ruff format --check .
