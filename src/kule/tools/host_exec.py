@@ -24,6 +24,8 @@ def _configured_target() -> str:
     if not _TARGET_PATTERN.fullmatch(target):
         raise RuntimeError("KULE_HOST_EXEC_TARGET must be a fixed user@host SSH target")
     return target
+
+
 _MAX_SCRIPT = 16384
 _SSH = "/usr/bin/ssh"
 
