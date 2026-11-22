@@ -45,3 +45,10 @@ jobs:
         run: pip install -e '.[dev]'
       - name: pytest
         run: pytest -q
+      - name: CLI and example configuration smoke test
+        env:
+          KULE_OIDC_CLIENT_SECRET: test-only-placeholder
+          KULE_JWT_SIGNING_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef
+        run: |
+          kule --help
+          kule check-config --config examples/config.example.toml
