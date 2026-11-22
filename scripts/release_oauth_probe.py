@@ -151,7 +151,9 @@ async def run(args: argparse.Namespace) -> None:
     print("PASS OAuth login, authorized whoami, and default-disabled host execution")
 
     if args.restart:
-        input("Restart only the disposable Kule service preserving its state and key; press Enter: ")
+        input(
+            "Restart only the disposable Kule service preserving its state and key; press Enter: "
+        )
         # An unexpected browser login on reconnect must fail the acceptance check.
         webbrowser.open = _unexpected_browser
         await connected_whoami(args.endpoint, oauth, expected_tools=True)
@@ -187,7 +189,10 @@ def main() -> int:
         asyncio.run(run(args))
     except (Exception, KeyboardInterrupt):
         # Never echo HTTP error payloads, tokens, claims, callback URLs or traceback.
-        print("FAIL release OAuth acceptance probe (details intentionally redacted)", file=sys.stderr)
+        print(
+            "FAIL release OAuth acceptance probe (details intentionally redacted)",
+            file=sys.stderr,
+        )
         return 1
     return 0
 
