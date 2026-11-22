@@ -215,9 +215,7 @@ async def test_single_host_image_only_registers_base_tools(make_cfg, claims, mon
         ("KULE_OPENHANDS_ENABLED", "1"),
     ],
 )
-def test_single_host_image_rejects_legacy_integrations(
-    make_cfg, claims, monkeypatch, flag, value
-):
+def test_single_host_image_rejects_legacy_integrations(make_cfg, claims, monkeypatch, flag, value):
     monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
     monkeypatch.setenv(flag, value)
     with pytest.raises(RuntimeError, match="Single-host Kule image"):
@@ -225,9 +223,7 @@ def test_single_host_image_rejects_legacy_integrations(
 
 
 @pytest.mark.parametrize("option", ["workspace_enabled", "developer_enabled"])
-def test_single_host_image_rejects_workspace_config(
-    make_cfg, claims, monkeypatch, option
-):
+def test_single_host_image_rejects_workspace_config(make_cfg, claims, monkeypatch, option):
     monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
     with pytest.raises(RuntimeError, match="Single-host Kule image"):
         build_server(make_cfg(**{option: True}), claims_getter=claims)
