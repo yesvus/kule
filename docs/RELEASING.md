@@ -10,7 +10,8 @@ Kule's first public version is planned as **v0.1.0**, an early single-host relea
 - [ ] Verify the refresh path beyond a token expiry without manual reconnect.
 - [ ] Validate the Linux ARM64/AMD64 container image with its actual CLI and configuration; record the immutable image **index digest**.
 - [ ] Document runtime dependencies and remove unrelated experimental integrations from the release artifact or clearly isolate them.
-- [ ] Align the Python package version, README install command, and release notes with the verified image tag `ghcr.io/yesvus/kule:sha-<release-commit>` and its immutable index digest.
+- [ ] Verify the Python package version is `0.1.0`, and README source-install instructions and release notes consistently identify the `v0.1.0` release (without implying PyPI publication).
+- [ ] Verify the separate container artifact `ghcr.io/yesvus/kule:sha-<release-commit>` and record its immutable OCI index digest and supported architectures in the release notes.
 - [ ] Complete code, security and CI reviews; retain a tested rollback path.
 
 ## Release procedure (after gates pass)
