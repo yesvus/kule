@@ -1,6 +1,6 @@
 # Build the published multi-arch application image in CI. Deploy ONLY by the
 # resulting verified OCI index digest (linux/arm64 present), never by a tag.
-FROM python:3.13.9-slim-bookworm AS wheelhouse
+FROM python:3.15.2-slim-bookworm AS wheelhouse
 WORKDIR /src
 COPY pyproject.toml README.md LICENSE ./
 COPY src/ ./src/
@@ -16,7 +16,7 @@ COPY contrib/argocd-mcp/package.json contrib/argocd-mcp/package-lock.json /opt/a
 RUN cd /opt/argocd-mcp && npm ci --omit=dev --ignore-scripts --no-audit --no-fund
 RUN test -f /opt/argocd-mcp/node_modules/argocd-mcp/dist/index.js
 
-FROM python:3.13.9-slim-bookworm AS runtime
+FROM python:3.15.2-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
@@ -36,6 +36,14 @@ COPY contrib/kubernetes-workspace.toml /usr/local/share/kule/kubernetes-workspac
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse kule \
     && rm -rf /wheelhouse \
     && node --version >/dev/null
+COPY examples/config.example.toml /tmp/kule-config-smoke.toml
+# Run the installed CLI under each image architecture, not just the host CI interpreter.
+RUN python -m pip check \
+    && kule --help >/dev/null \
+    && KULE_OIDC_CLIENT_SECRET=ci-placeholder \
+       KULE_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+       kule check-config --config /tmp/kule-config-smoke.toml \
+    && rm -f /tmp/kule-config-smoke.toml
 USER 10001:10001
 EXPOSE 8795
 ENTRYPOINT ["kule"]
