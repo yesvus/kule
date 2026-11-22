@@ -90,7 +90,13 @@ jobs:
           "$root/venv/bin/kule" check-config --config "$root/config.toml"
           test "$(stat -c '%a' "$root/config.toml")" = 600
           test "$(stat -c '%a' "$root/.local/kule/state")" = 700
-          ! grep -R -F -q "$KULE_OIDC_CLIENT_SECRET" "$root/config.toml" "$root/.local"
-          ! grep -R -F -q "$KULE_JWT_SIGNING_KEY" "$root/config.toml" "$root/.local"
+          if grep -R -F -q "$KULE_OIDC_CLIENT_SECRET" "$root/config.toml" "$root/.local"; then
+            echo "OIDC secret was persisted during onboarding" >&2
+            exit 1
+          fi
+          if grep -R -F -q "$KULE_JWT_SIGNING_KEY" "$root/config.toml" "$root/.local"; then
+            echo "JWT signing key was persisted during onboarding" >&2
+            exit 1
+          fi
           grep -q '^exec_enabled = false
  "$root/config.toml"
