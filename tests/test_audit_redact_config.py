@@ -289,3 +289,15 @@ def test_conflicting_old_and_new_credentials_fail_closed(tmp_path):
     env = {**ENV, "OPERATOR_MCP_OIDC_CLIENT_SECRET": "different"}
     with pytest.raises(ConfigError, match="conflicting"):
         load_config(write(tmp_path, GOOD), env)
+
+
+def test_empty_new_secret_falls_back_to_legacy_secret(tmp_path):
+    env = {
+        "KULE_OIDC_CLIENT_SECRET": "",
+        "KULE_JWT_SIGNING_KEY": "",
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "old-client-secret",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "l" * 40,
+    }
+    cfg = load_config(write(tmp_path, GOOD), env)
+    assert cfg.auth.client_secret == "old-client-secret"
+    assert cfg.auth.jwt_signing_key == "l" * 40
