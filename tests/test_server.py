@@ -243,9 +243,7 @@ def test_single_host_marker_cannot_be_overridden_by_environment(
         build_server(make_cfg(), claims_getter=claims)
 
 
-async def test_single_host_image_retains_opt_in_ssh_tool(
-    make_cfg, claims, monkeypatch, tmp_path
-):
+async def test_single_host_image_retains_opt_in_ssh_tool(make_cfg, claims, monkeypatch, tmp_path):
     from kule.tools import host_exec as ssh_tool
 
     monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")

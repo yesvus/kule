@@ -180,9 +180,7 @@ def is_single_host_image(env: dict[str, str] | None = None) -> bool:
     return SINGLE_HOST_IMAGE_MARKER.is_file() or env.get("KULE_SINGLE_HOST_IMAGE") == "1"
 
 
-def validate_single_host_integrations(
-    cfg: Config, env: dict[str, str] | None = None
-) -> bool:
+def validate_single_host_integrations(cfg: Config, env: dict[str, str] | None = None) -> bool:
     """Fail closed on unsupported public-image integration configuration."""
     env = os.environ if env is None else env
     if not is_single_host_image(env):
