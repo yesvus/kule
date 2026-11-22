@@ -7,10 +7,10 @@ import pytest
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.authz import Policy
-from operator_mcp.middleware import OperatorMiddleware
-from operator_mcp.tools import upstream_kubernetes as upstream
+from kule.audit import AuditLog, verify
+from kule.authz import Policy
+from kule.middleware import OperatorMiddleware
+from kule.tools import upstream_kubernetes as upstream
 
 
 def test_projected_token_is_referenced_never_copied(monkeypatch, tmp_path):

@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "operator-mcp"
+name = "kule"
 version = "0.1.0.dev0"
-description = "Small self-hosted MCP server for operator-level host management, with OIDC login, group-based authorization and an audit log."
+description = "Small self-hosted MCP server for authorized host management, with OIDC login, group-based authorization and an audit log."
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
@@ -26,10 +26,10 @@ dev = [
 ]
 
 [project.scripts]
-operator-mcp = "operator_mcp.cli:main"
+kule = "kule.cli:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/operator_mcp"]
+packages = ["src/kule"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
