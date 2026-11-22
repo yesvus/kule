@@ -1,6 +1,5 @@
 name: Maintenance or RFC
 description: Track documentation, maintenance work, or a design discussion.
-title: "chore: "
 labels: ["maintenance", "needs-triage"]
 body:
   - type: dropdown

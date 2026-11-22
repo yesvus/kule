@@ -1,6 +1,5 @@
 name: Feature proposal
 description: Suggest an improvement to Kule host management.
-title: "feat: "
 labels: ["enhancement", "needs-triage"]
 body:
   - type: markdown

@@ -1,6 +1,5 @@
 name: Bug report
 description: Report a reproducible problem in Kule.
-title: "bug: "
 labels: ["bug", "needs-triage"]
 body:
   - type: markdown
