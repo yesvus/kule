@@ -24,6 +24,7 @@ async def test_host_exec_default_off(make_cfg, claims, monkeypatch):
 
 async def test_host_exec_requires_both_groups_and_audits_digest(make_cfg, claims, monkeypatch):
     monkeypatch.setenv("KULE_HOST_EXEC_ENABLED", "1")
+    monkeypatch.setenv("KULE_HOST_EXEC_TARGET", "user@host.example")
     monkeypatch.setattr(host_exec, "Path", lambda name: SimpleNamespace(is_file=lambda: True))
     monkeypatch.setattr(host_exec, "_KEY", SimpleNamespace(is_file=lambda: True))
     monkeypatch.setattr(host_exec, "_KNOWN_HOSTS", SimpleNamespace(is_file=lambda: True))
@@ -63,11 +64,22 @@ async def test_host_exec_requires_both_groups_and_audits_digest(make_cfg, claims
     assert "script_sha256" in audit
 
 
-def test_ssh_command_is_fixed_and_strict():
+def test_ssh_command_is_fixed_and_strict(monkeypatch):
+    monkeypatch.setenv("KULE_HOST_EXEC_TARGET", "user@host.example")
     args = host_exec._argv(20)
-    assert args[-2] == "yesvus@100.82.175.48"
+    assert args[-2] == "user@host.example"
     assert "StrictHostKeyChecking=yes" in args
     assert "IdentityAgent=none" in args
     assert "ClearAllForwardings=yes" in args
     assert "BatchMode=yes" in args
     assert args[-1].endswith("/bin/bash --noprofile --norc -s")
+
+
+def test_ssh_target_is_required_and_fixed(monkeypatch):
+    monkeypatch.delenv("KULE_HOST_EXEC_TARGET", raising=False)
+    with pytest.raises(RuntimeError, match="KULE_HOST_EXEC_TARGET"):
+        host_exec._argv(20)
+    for target in ("-oProxyCommand=whoami", "user@host;whoami", "user@host/path"):
+        monkeypatch.setenv("KULE_HOST_EXEC_TARGET", target)
+        with pytest.raises(RuntimeError, match="KULE_HOST_EXEC_TARGET"):
+            host_exec._argv(20)
