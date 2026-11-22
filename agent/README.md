@@ -2,7 +2,7 @@
 
 The planned host-resident process for Kule-managed machines.
 
-Each agent initiates an outbound authenticated TLS WebSocket (`wss://`) session to its Hub, identifies its enrolled host, and applies local allowlists to command, file and service operations. Execution remains bounded and subject to host-specific policy.
+Each agent is designed to initiate an outbound authenticated TLS WebSocket (`wss://`) session to its Hub, identify its enrolled host, and enforce local allowlists for command, file and service operations. Unenrolled or disconnected agents will reject remote calls. Execution will be bounded by host-specific policy; independent SSH/console access will remain available to the host owner.
 
 The dedicated agent package is in development.
 

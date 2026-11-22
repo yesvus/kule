@@ -1,20 +1,20 @@
 # Kule architecture
 
-Kule connects MCP clients to authorized operations on enrolled hosts. The architecture separates the MCP-facing service, the host-resident agent, and their shared transport contract.
+Kule connects MCP clients to authorized host operations. The multi-host architecture below is the target design; the Hub/Agent transport and enrollment lifecycle are not implemented yet.
 
 ## Components
 
 ### Hub
 
-The Hub handles OAuth/OIDC, host inventory and enrollment, operation-level policy, session routing and audit events. Its MCP endpoint is exposed over HTTPS. Agents connect to a Hub-side WebSocket listener and maintain authenticated sessions.
+The Hub will handle OAuth/OIDC, host inventory and enrollment, operation-level policy, session routing and audit events. Its MCP endpoint will be exposed over HTTPS. Agents will connect to a Hub-side WebSocket listener and maintain authenticated sessions.
 
 ### Agent
 
-An agent runs on each managed host and initiates an outbound, authenticated TLS WebSocket connection (`wss://`) to the Hub. It verifies incoming requests against local command, file and service policies before executing them. Agents use distinct host identities and retain bounded resource use.
+An agent will run on each managed host and initiate an outbound, authenticated TLS WebSocket connection (`wss://`) to the Hub. It will verify incoming requests against local command, file and service policies before executing them. Agents will use distinct host identities and bounded resource limits.
 
 ### Protocol
 
-The versioned protocol defines enrollment identity, connection handshake, typed requests and responses, request IDs, capability negotiation, expiration and reconnection behavior. The Hub validates host identity on connection and authorizes each operation before routing it.
+The versioned protocol will define enrollment identity, connection handshake, typed requests and responses, request IDs, capability negotiation, expiration and reconnection behavior. The Kule Hub will issue and validate enrollment identities, authenticate agents on connection and authorize every operation before routing it.
 
 ```text
 MCP client ──HTTPS/OAuth──> Kule Hub <──outbound WSS── Host Agent
@@ -24,14 +24,14 @@ MCP client ──HTTPS/OAuth──> Kule Hub <──outbound WSS── Host Agen
                                                         host
 ```
 
-## Security model
+## Target security model
 
-- The caller's OAuth identity and host/operation permissions are evaluated for each request.
-- Agents separately enforce operation restrictions close to the host.
-- Clients identify hosts by enrolled IDs rather than arbitrary network addresses.
-- TLS, bounded timeouts, size limits and explicit revocation protect the transport.
-- Audit records omit credentials and command bodies by default. Any redaction is best-effort, rather than a secret-isolation mechanism.
-- Manual host recovery remains available independently of Hub availability.
+- The Hub will evaluate the caller's OAuth identity and host/operation permissions for each request.
+- Agents will independently enforce operation restrictions on the host.
+- Clients will identify hosts by enrolled IDs rather than arbitrary network addresses.
+- TLS, bounded timeouts, frame-size limits and explicit revocation will protect the transport.
+- Audit records will omit credentials and command bodies by default. Any redaction remains best-effort, rather than a secret-isolation mechanism.
+- Manual host recovery will remain independent of Hub availability.
 
 ## Development status
 

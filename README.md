@@ -25,7 +25,7 @@ Kule gives MCP-compatible assistants a secure way to inspect and operate approve
 - **Identity-aware:** OAuth/OIDC login and group-based access policies.
 - **Controlled execution:** Explicitly enabled host operations, with time and output limits.
 - **Auditable:** Structured records, hash-chain verification, and sensitive-value redaction.
-- **Recoverable:** Emergency tool disable and independent access to managed hosts.
+- **Emergency stop:** Disable tool calls using a server-side kill-switch file.
 
 ## Getting started
 
@@ -42,13 +42,13 @@ Set the public URL, OIDC discovery URL, and OAuth client ID in `config.toml`. Se
 
 ```bash
 export KULE_OIDC_CLIENT_SECRET="your-oidc-client-secret"
-export KULE_JWT_SIGNING_KEY="your-random-signing-key-at-least-32-characters"
+export KULE_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
 kule check-config --config config.toml
 kule serve --config config.toml
 ```
 
-Connect your MCP client to `https://your-domain.example/mcp`. Keep host execution disabled until its access policy and SSH identity are configured.
+Generate the signing key once, store it in your secret manager, and reuse the same value across restarts. Rotating it invalidates existing OAuth state. Connect your MCP client to `https://your-domain.example/mcp`. Keep host execution disabled until its access policy and SSH identity are configured.
 
 For local development:
 
