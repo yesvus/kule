@@ -15,7 +15,11 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 10001 kule \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent kule
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent kule \
+    && install -d -m 0700 -o 10001 -g 10001 /var/lib/kule \
+    && install -d -m 0755 -o root -g root /usr/local/share/kule \
+    && touch /usr/local/share/kule/SINGLE_HOST_IMAGE \
+    && chmod 0444 /usr/local/share/kule/SINGLE_HOST_IMAGE
 COPY --from=wheelhouse /wheelhouse /wheelhouse
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse kule \
     && rm -rf /wheelhouse
@@ -27,7 +31,8 @@ RUN python -m pip check \
        KULE_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
        kule check-config --config /tmp/kule-config-smoke.toml \
     && rm -f /tmp/kule-config-smoke.toml
+WORKDIR /var/lib/kule
 USER 10001:10001
 EXPOSE 8795
 ENTRYPOINT ["kule"]
-CMD ["serve", "--config", "/etc/kule/config.toml"]
+CMD ["serve", "--config", "/var/lib/kule/config.toml"]

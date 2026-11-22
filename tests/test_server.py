@@ -227,3 +227,17 @@ def test_single_host_image_rejects_workspace_config(make_cfg, claims, monkeypatc
     monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
     with pytest.raises(RuntimeError, match="Single-host Kule image"):
         build_server(make_cfg(**{option: True}), claims_getter=claims)
+
+
+def test_single_host_marker_cannot_be_overridden_by_environment(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    from kule import server
+
+    marker = tmp_path / "SINGLE_HOST_IMAGE"
+    marker.touch()
+    monkeypatch.setattr(server, "_SINGLE_HOST_MARKER", marker)
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "0")
+    monkeypatch.setenv("KULE_K8S_API_URL", "https://localhost:6443")
+    with pytest.raises(RuntimeError, match="Single-host Kule image"):
+        build_server(make_cfg(), claims_getter=claims)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP, settings
@@ -23,6 +24,8 @@ from .tools import (
     upstream_kubernetes,
     workspace,
 )
+
+_SINGLE_HOST_MARKER = Path("/usr/local/share/kule/SINGLE_HOST_IMAGE")
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -79,7 +82,7 @@ def build_server(
     # The public release image intentionally excludes the legacy
     # Kubernetes/Argo CD/OpenHands toolchain. Refuse incompatible options
     # rather than advertising tools that cannot run in this image.
-    single_host = os.environ.get("KULE_SINGLE_HOST_IMAGE") == "1"
+    single_host = _SINGLE_HOST_MARKER.is_file() or os.environ.get("KULE_SINGLE_HOST_IMAGE") == "1"
     if single_host and (
         cfg.tools.workspace_enabled
         or cfg.tools.developer_enabled
