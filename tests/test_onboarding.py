@@ -289,3 +289,16 @@ def test_init_rejects_world_writable_local_ancestor(tmp_path, capsys):
     assert not path.exists()
     assert not (local / "kule").exists()
     assert "non-writable-by-others" in capsys.readouterr().err
+
+
+def test_single_host_incompatible_integration_fails_doctor_and_check_config(
+    tmp_path, monkeypatch, capsys
+):
+    path = initialize(tmp_path)
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.setenv("KULE_K8S_API_URL", "https://localhost:6443")
+    assert main(["doctor", "--config", str(path)]) == 2
+    assert main(["check-config", "--config", str(path)]) == 2
+    assert "Single-host Kule image" in capsys.readouterr().err

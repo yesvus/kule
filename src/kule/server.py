@@ -11,7 +11,7 @@ from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from .audit import AuditLog
 from .authz import Policy
-from .config import Config
+from .config import Config, validate_single_host_integrations
 from .integrations import IntegrationRegistry
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
 from .tools import (
@@ -76,6 +76,8 @@ def build_server(
     claims_getter: ClaimsGetter = claims_from_request,
     integrations: IntegrationRegistry | None = None,
 ) -> FastMCP:
+    single_host = validate_single_host_integrations(cfg)
+
     policy = Policy(
         required_group=cfg.auth.required_group,
         exec_group=cfg.auth.exec_group,
@@ -108,12 +110,13 @@ def build_server(
     )
     basic.register(mcp, cfg, claims_getter, policy)
     host_exec.register(mcp, cfg)
-    workspace.register(mcp, cfg)
-    kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
-    if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
-        upstream_kubernetes.mount(mcp)
-    if os.environ.get("KULE_ARGOCD_UPSTREAM_ENABLED") == "1":
-        upstream_argocd.mount(mcp)
-    if os.environ.get("KULE_OPENHANDS_ENABLED") == "1":
-        openhands.mount(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+    if not single_host:
+        workspace.register(mcp, cfg)
+        kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+        if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
+            upstream_kubernetes.mount(mcp)
+        if os.environ.get("KULE_ARGOCD_UPSTREAM_ENABLED") == "1":
+            upstream_argocd.mount(mcp)
+        if os.environ.get("KULE_OPENHANDS_ENABLED") == "1":
+            openhands.mount(mcp, timeout_seconds=cfg.tools.timeout_seconds)
     return mcp

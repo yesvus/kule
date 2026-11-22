@@ -191,3 +191,73 @@ def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
     with pytest.raises(Stop):
         srv.build_auth(cfg)
     assert os.environ["FASTMCP_HOME"] == str(cfg.server.state_dir / "fastmcp")
+
+
+async def test_single_host_image_only_registers_base_tools(make_cfg, claims, monkeypatch):
+    """Release image never exposes the legacy integration tool collection."""
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.delenv("KULE_K8S_API_URL", raising=False)
+    monkeypatch.delenv("KULE_K8S_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.delenv("KULE_ARGOCD_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.delenv("KULE_OPENHANDS_ENABLED", raising=False)
+    claims.value = OPERATOR
+    mcp = build_server(make_cfg(), claims_getter=claims)
+    async with Client(mcp) as client:
+        assert {tool.name for tool in await client.list_tools()} == {"whoami", "note_write"}
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("KULE_K8S_API_URL", "https://localhost:6443"),
+        ("KULE_K8S_UPSTREAM_ENABLED", "1"),
+        ("KULE_ARGOCD_UPSTREAM_ENABLED", "1"),
+        ("KULE_OPENHANDS_ENABLED", "1"),
+    ],
+)
+def test_single_host_image_rejects_legacy_integrations(make_cfg, claims, monkeypatch, flag, value):
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.setenv(flag, value)
+    with pytest.raises(ValueError, match="Single-host Kule image"):
+        build_server(make_cfg(), claims_getter=claims)
+
+
+@pytest.mark.parametrize("option", ["workspace_enabled", "developer_enabled"])
+def test_single_host_image_rejects_workspace_config(make_cfg, claims, monkeypatch, option):
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    with pytest.raises(ValueError, match="Single-host Kule image"):
+        build_server(make_cfg(**{option: True}), claims_getter=claims)
+
+
+def test_single_host_marker_cannot_be_overridden_by_environment(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    from kule import config
+
+    marker = tmp_path / "SINGLE_HOST_IMAGE"
+    marker.touch()
+    monkeypatch.setattr(config, "SINGLE_HOST_IMAGE_MARKER", marker)
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "0")
+    monkeypatch.setenv("KULE_K8S_API_URL", "https://localhost:6443")
+    with pytest.raises(ValueError, match="Single-host Kule image"):
+        build_server(make_cfg(), claims_getter=claims)
+
+
+async def test_single_host_image_retains_opt_in_ssh_tool(make_cfg, claims, monkeypatch, tmp_path):
+    from kule.tools import host_exec as ssh_tool
+
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.setenv("KULE_HOST_EXEC_ENABLED", "1")
+    monkeypatch.setenv("KULE_HOST_EXEC_TARGET", "operator@host.example.com")
+    for name in ("id_ed25519", "known_hosts", "ssh"):
+        (tmp_path / name).touch()
+    monkeypatch.setattr(ssh_tool, "_KEY", tmp_path / "id_ed25519")
+    monkeypatch.setattr(ssh_tool, "_KNOWN_HOSTS", tmp_path / "known_hosts")
+    monkeypatch.setattr(ssh_tool, "_SSH", str(tmp_path / "ssh"))
+
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=45)
+    claims.value = {**OPERATOR, "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+    async with Client(mcp) as client:
+        names = {tool.name for tool in await client.list_tools()}
+    assert names == {"whoami", "note_write", "host_exec"}
