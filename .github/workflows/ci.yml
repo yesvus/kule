@@ -98,5 +98,4 @@ jobs:
             echo "JWT signing key was persisted during onboarding" >&2
             exit 1
           fi
-          grep -q '^exec_enabled = false
- "$root/config.toml"
+          grep -F -q 'exec_enabled = false' "$root/config.toml"
