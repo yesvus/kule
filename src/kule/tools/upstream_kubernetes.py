@@ -17,7 +17,7 @@ from fastmcp.server import create_proxy
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.server.transforms.tool_transform import ToolTransformConfig
 
-from operator_mcp.config import validate_k8s_api_url
+from kule.config import validate_k8s_api_url
 
 _BINARY = "/usr/local/bin/kubernetes-mcp-server"
 _CONFIG = "/usr/local/share/kule/kubernetes-upstream.toml"
