@@ -76,6 +76,27 @@ def build_server(
     claims_getter: ClaimsGetter = claims_from_request,
     integrations: IntegrationRegistry | None = None,
 ) -> FastMCP:
+    # The public release image intentionally excludes the legacy
+    # Kubernetes/Argo CD/OpenHands toolchain. Refuse incompatible options
+    # rather than advertising tools that cannot run in this image.
+    single_host = os.environ.get("KULE_SINGLE_HOST_IMAGE") == "1"
+    if single_host and (
+        cfg.tools.workspace_enabled
+        or cfg.tools.developer_enabled
+        or os.environ.get("KULE_K8S_API_URL")
+        or any(
+            os.environ.get(flag) == "1"
+            for flag in (
+                "KULE_K8S_UPSTREAM_ENABLED",
+                "KULE_ARGOCD_UPSTREAM_ENABLED",
+                "KULE_OPENHANDS_ENABLED",
+            )
+        )
+    ):
+        raise RuntimeError(
+            "Single-host Kule image cannot enable Kubernetes, workspace, or agent integrations"
+        )
+
     policy = Policy(
         required_group=cfg.auth.required_group,
         exec_group=cfg.auth.exec_group,
@@ -108,12 +129,13 @@ def build_server(
     )
     basic.register(mcp, cfg, claims_getter, policy)
     host_exec.register(mcp, cfg)
-    workspace.register(mcp, cfg)
-    kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
-    if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
-        upstream_kubernetes.mount(mcp)
-    if os.environ.get("KULE_ARGOCD_UPSTREAM_ENABLED") == "1":
-        upstream_argocd.mount(mcp)
-    if os.environ.get("KULE_OPENHANDS_ENABLED") == "1":
-        openhands.mount(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+    if not single_host:
+        workspace.register(mcp, cfg)
+        kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
+        if os.environ.get("KULE_K8S_UPSTREAM_ENABLED") == "1":
+            upstream_kubernetes.mount(mcp)
+        if os.environ.get("KULE_ARGOCD_UPSTREAM_ENABLED") == "1":
+            upstream_argocd.mount(mcp)
+        if os.environ.get("KULE_OPENHANDS_ENABLED") == "1":
+            openhands.mount(mcp, timeout_seconds=cfg.tools.timeout_seconds)
     return mcp

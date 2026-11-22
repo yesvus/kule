@@ -71,6 +71,12 @@ https://mcp.example.com/mcp
 
 Sign in, verify whoami from your client, and check that an unauthenticated request is denied. Verify session continuity across restart and token expiry before treating a deployment as stable.
 
+## Container distribution
+
+The public GHCR image is built from `Dockerfile.single-host`. It includes Python, Kule, and the OpenSSH client, while excluding the legacy Kubernetes MCP and Argo CD runtime binaries. Kubernetes, workspace, and OpenHands integrations are intentionally unavailable in this image; explicitly enabling them will fail at startup instead of returning partial tool behavior. The older `Dockerfile` remains available to maintainers working on integrations.
+
+For a new installation, persist the configuration, OAuth state directory, audit files, and signing key externally. Run the container behind HTTPS, provide the OIDC client secret and signing key through a secret manager, and retain separate host recovery access. This container change does not migrate an existing deployment.
+
 ## 5. Enable a host deliberately
 
 Read [configuration](CONFIGURATION.md#host-execution) to configure a pinned SSH identity and known-hosts file, a fixed KULE_HOST_EXEC_TARGET, distinct execution group, and explicit execution opt-in. Do not enable privileged tools until authorization and audit have been tested.

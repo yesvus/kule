@@ -191,3 +191,43 @@ def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
     with pytest.raises(Stop):
         srv.build_auth(cfg)
     assert os.environ["FASTMCP_HOME"] == str(cfg.server.state_dir / "fastmcp")
+
+
+async def test_single_host_image_only_registers_base_tools(make_cfg, claims, monkeypatch):
+    """Release image never exposes the legacy integration tool collection."""
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.delenv("KULE_K8S_API_URL", raising=False)
+    monkeypatch.delenv("KULE_K8S_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.delenv("KULE_ARGOCD_UPSTREAM_ENABLED", raising=False)
+    monkeypatch.delenv("KULE_OPENHANDS_ENABLED", raising=False)
+    claims.value = OPERATOR
+    mcp = build_server(make_cfg(), claims_getter=claims)
+    async with Client(mcp) as client:
+        assert {tool.name for tool in await client.list_tools()} == {"whoami", "note_write"}
+
+
+@pytest.mark.parametrize(
+    "flag,value",
+    [
+        ("KULE_K8S_API_URL", "https://localhost:6443"),
+        ("KULE_K8S_UPSTREAM_ENABLED", "1"),
+        ("KULE_ARGOCD_UPSTREAM_ENABLED", "1"),
+        ("KULE_OPENHANDS_ENABLED", "1"),
+    ],
+)
+def test_single_host_image_rejects_legacy_integrations(
+    make_cfg, claims, monkeypatch, flag, value
+):
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.setenv(flag, value)
+    with pytest.raises(RuntimeError, match="Single-host Kule image"):
+        build_server(make_cfg(), claims_getter=claims)
+
+
+@pytest.mark.parametrize("option", ["workspace_enabled", "developer_enabled"])
+def test_single_host_image_rejects_workspace_config(
+    make_cfg, claims, monkeypatch, option
+):
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    with pytest.raises(RuntimeError, match="Single-host Kule image"):
+        build_server(make_cfg(**{option: True}), claims_getter=claims)
