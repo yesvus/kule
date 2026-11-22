@@ -1,6 +1,6 @@
 # Security Policy
 
-Kule provides privileged operations on enrolled hosts. Security reports are welcome and taken seriously.
+Kule provides privileged operations on configured hosts. Security reports are welcome and taken seriously.
 
 ## Reporting vulnerabilities
 

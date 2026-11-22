@@ -218,7 +218,9 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         breakglass_max_ttl_seconds=_int(
             t.get("breakglass_max_ttl_seconds", 900), "tools.breakglass_max_ttl_seconds"
         ),
-        scratch_dir=_path(t.get("scratch_dir", str(LEGACY_STATE_DIR / "scratch")), "tools.scratch_dir"),
+        scratch_dir=_path(
+            t.get("scratch_dir", str(LEGACY_STATE_DIR / "scratch")), "tools.scratch_dir"
+        ),
         timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
         max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),
     )

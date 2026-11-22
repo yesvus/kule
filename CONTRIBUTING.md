@@ -10,7 +10,7 @@ Kule uses Python 3.11+ and [FastMCP](https://gofastmcp.com/).
 git clone https://github.com/yesvus/kule.git
 cd kule
 python -m venv .venv
-. .venv/bin/activate
+. .venv/bin/activate  # Linux/macOS; on Windows PowerShell: .venv\\Scripts\\Activate.ps1
 python -m pip install -e '.[dev]'
 ruff check .
 ruff format --check .

@@ -25,6 +25,6 @@ kule serve --config config.toml
 
 ## Host execution
 
-Host execution is disabled by default. For the current SSH backend, enabling it requires both `tools.exec_enabled = true` and `KULE_HOST_EXEC_ENABLED=1`, plus a fixed `KULE_HOST_EXEC_TARGET=user@host` (no port, path or SSH options). Set `tools.timeout_seconds` to at least 15 and keep `tools.developer_enabled = false` in this runtime. A dedicated SSH identity and pinned known-hosts file are expected at `/var/run/kule-host-ssh/`. Keep the service account restricted and allow execution only to the approved identity-provider group.
+Host execution is disabled by default. For the current SSH backend, enabling it requires both `tools.exec_enabled = true` and `KULE_HOST_EXEC_ENABLED=1`, plus a fixed `KULE_HOST_EXEC_TARGET=user@host` (a DNS hostname or IPv4 address; no IPv6 literal, port, path or SSH options). Set `tools.timeout_seconds` to at least 15 and keep `tools.developer_enabled = false` in this runtime. A dedicated SSH identity and pinned known-hosts file are expected at `/var/run/kule-host-ssh/`. Keep the service account restricted and allow execution only to the approved identity-provider group.
 
 Kule's public HTTP endpoint should normally bind to localhost behind a trusted TLS reverse proxy.
