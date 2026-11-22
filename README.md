@@ -38,7 +38,7 @@ python -m pip install .
 cp examples/config.example.toml config.toml
 ```
 
-Set the public URL, OIDC discovery URL, and OAuth client ID in `config.toml`. Supply credentials via the environment or your secret manager:
+Set the public URL, OIDC discovery URL, and OAuth client ID in `config.toml`. See [Configuration](docs/CONFIGURATION.md) for settings and execution-policy requirements. Supply credentials via the environment or your secret manager:
 
 ```bash
 export KULE_OIDC_CLIENT_SECRET="your-oidc-client-secret"
