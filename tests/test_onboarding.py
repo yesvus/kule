@@ -141,3 +141,17 @@ def test_init_rejects_group_collision(tmp_path, capsys):
     assert main(args) == 2
     assert "distinct" in capsys.readouterr().err
     assert not path.exists()
+
+
+def test_doctor_never_echoes_embedded_url_credentials(tmp_path, monkeypatch, capsys):
+    path = initialize(tmp_path)
+    text = path.read_text().replace(
+        "https://mcp.example.com", "https://username:embedded-secret@mcp.example.com"
+    )
+    path.write_text(text)
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)
+    assert main(["doctor", "--config", str(path)]) == 1
+    output = capsys.readouterr().out
+    assert "embedded-secret" not in output
+    assert "FAIL endpoint" in output

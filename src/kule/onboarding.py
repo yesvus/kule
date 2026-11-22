@@ -167,6 +167,25 @@ def doctor(path: Path) -> int:
     else:
         print("PASS privileged host execution disabled")
 
-    print(f"MCP endpoint: {cfg.server.public_url}/mcp")
+    # Validate the visible URL before printing it; legacy configs may be less strict.
+    try:
+        endpoint = urlsplit(cfg.server.public_url)
+        safe_origin = (
+            endpoint.scheme == "https"
+            and endpoint.hostname is not None
+            and endpoint.username is None
+            and endpoint.password is None
+            and endpoint.path in ("", "/")
+            and not endpoint.query
+            and not endpoint.fragment
+            and all(not ch.isspace() and ord(ch) >= 32 for ch in cfg.server.public_url)
+        )
+    except ValueError:
+        safe_origin = False
+    if safe_origin:
+        print(f"MCP endpoint: {cfg.server.public_url.rstrip('/')}/mcp")
+    else:
+        print("FAIL endpoint: public URL must be an HTTPS origin without credentials or query")
+        problems += 1
     print("SKIP external HTTPS, OIDC connectivity, and client login (offline check)")
     return 1 if problems else 0
