@@ -1,5 +1,7 @@
 # Configuration
 
+Start with the [first-run guide](ONBOARDING.md), or use the reference example for manual configuration.
+
 Kule reads non-secret settings from TOML and credentials from environment variables or an external secret manager.
 
 Start from [`examples/config.example.toml`](../examples/config.example.toml), then configure:
