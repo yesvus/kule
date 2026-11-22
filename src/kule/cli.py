@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
                 required_group=args.required_group,
                 exec_group=args.exec_group,
             )
+        except (EOFError, KeyboardInterrupt):
+            print("init cancelled", file=sys.stderr)
+            return 130
         except (OSError, ValueError) as exc:
             print(f"init error: {exc}", file=sys.stderr)
             return 2

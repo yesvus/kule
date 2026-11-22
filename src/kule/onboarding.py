@@ -17,14 +17,16 @@ def _required(value: str | None, flag: str, prompt: str) -> str:
         if not sys.stdin.isatty():
             raise ConfigError(f"{flag} is required in non-interactive mode")
         value = input(f"{prompt}: ").strip()
-    if not value or value != value.strip() or any(ord(ch) < 32 for ch in value):
+    if not value or value != value.strip() or any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ConfigError(f"{flag} must be a non-empty value without control characters")
     return value
 
 
 def _https(value: str, flag: str, *, origin: bool = False) -> str:
-    if any(ch.isspace() or ord(ch) < 32 for ch in value):
+    if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
         raise ConfigError(f"{flag} must be an HTTPS URL without whitespace")
+    if "?" in value or "#" in value:
+        raise ConfigError(f"{flag} must not include query or fragment delimiters")
     try:
         url = urlsplit(value)
         port = url.port
@@ -42,7 +44,8 @@ def _https(value: str, flag: str, *, origin: bool = False) -> str:
         or (origin and url.path not in ("", "/"))
     ):
         raise ConfigError(f"{flag} must be an HTTPS {'origin' if origin else 'URL'}")
-    return value.rstrip("/") if origin else value
+    normalized = "https://" + value.split("://", 1)[1]
+    return normalized.rstrip("/") if origin else normalized
 
 
 def _private_directory(path: Path) -> None:
@@ -83,8 +86,11 @@ def init_config(
     if len({required_group, exec_group, "mcp-workspace", "mcp-developers"}) != 4:
         raise ConfigError("role groups must be distinct")
 
-    root = path.absolute().parent / ".local" / "kule"
-    directories = (root, root / "state", root / "audit", root / "scratch")
+    local = path.absolute().parent / ".local"
+    if local.is_symlink():
+        raise ConfigError("setup ancestor .local must not be a symbolic link")
+    root = local / "kule"
+    directories = (local, root, root / "state", root / "audit", root / "scratch")
     for directory in directories:
         _private_directory(directory)
 
@@ -137,8 +143,10 @@ def doctor(path: Path) -> int:
         if directory.is_symlink() or not directory.is_dir():
             print(f"FAIL {name}: private writable directory missing or is a symlink")
             problems += 1
-        elif not os.access(directory, os.W_OK | os.X_OK):
-            print(f"FAIL {name}: directory is not writable")
+        elif stat.S_IMODE(directory.stat().st_mode) & 0o077 or not os.access(
+            directory, os.W_OK | os.X_OK
+        ):
+            print(f"FAIL {name}: directory must be private and writable")
             problems += 1
         else:
             print(f"PASS {name} directory")
@@ -152,6 +160,15 @@ def doctor(path: Path) -> int:
     if cfg.tools.exec_enabled:
         from .tools.host_exec import _configured_target
 
+        if cfg.tools.developer_enabled:
+            print("FAIL host execution: developer runtime cannot share host shell")
+            problems += 1
+        if cfg.tools.timeout_seconds < 15:
+            print("FAIL host execution: timeout must be at least 15 seconds")
+            problems += 1
+        if not Path("/usr/bin/ssh").is_file():
+            print("FAIL host execution: SSH executable missing")
+            problems += 1
         if os.environ.get("KULE_HOST_EXEC_ENABLED") != "1":
             print("FAIL host execution: enable gate missing")
             problems += 1
@@ -170,15 +187,22 @@ def doctor(path: Path) -> int:
     # Validate the visible URL before printing it; legacy configs may be less strict.
     try:
         endpoint = urlsplit(cfg.server.public_url)
+        port = endpoint.port
         safe_origin = (
             endpoint.scheme == "https"
             and endpoint.hostname is not None
+            and (port is None or 1 <= port <= 65535)
             and endpoint.username is None
             and endpoint.password is None
             and endpoint.path in ("", "/")
             and not endpoint.query
             and not endpoint.fragment
-            and all(not ch.isspace() and ord(ch) >= 32 for ch in cfg.server.public_url)
+            and "?" not in cfg.server.public_url
+            and "#" not in cfg.server.public_url
+            and all(
+                not ch.isspace() and 32 <= ord(ch) < 127
+                for ch in cfg.server.public_url
+            )
         )
     except ValueError:
         safe_origin = False
