@@ -1,6 +1,6 @@
 # Kule: host-control monorepo architecture
 
-**Status:** owner direction recorded 2026-11-22; implementation and deployment **not yet complete**.
+**Status:** Proposed architecture; implementation and deployment **not yet complete**.
 
 ## Product boundary
 
