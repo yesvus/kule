@@ -173,7 +173,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--endpoint", required=True, type=endpoint_url)
     parser.add_argument(
-        "--mode", choices=["anonymous", "authorized", "wrong-group", "stopped"],
+        "--mode",
+        choices=["anonymous", "authorized", "wrong-group", "stopped"],
         default="anonymous",
     )
     parser.add_argument("--callback-port", type=int, default=8765)
