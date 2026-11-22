@@ -141,14 +141,14 @@ async def run(args: argparse.Namespace) -> None:
         return
 
     print("INFO sign in with the disposable account in the required group")
-    await connected_whoami(args.endpoint, oauth, expected_tools=True)
-    print("PASS OAuth login, authorized whoami, and default-disabled host execution")
-
     if args.mode == "stopped":
-        # The caller should engage DISABLED on the disposable server BEFORE running.
+        # The caller must engage DISABLED on the disposable server beforehand.
         await check_stopped(args.endpoint, oauth)
         print("PASS authenticated request denied by emergency stop")
         return
+
+    await connected_whoami(args.endpoint, oauth, expected_tools=True)
+    print("PASS OAuth login, authorized whoami, and default-disabled host execution")
 
     if args.restart:
         input("Restart only the disposable Kule service preserving its state and key; press Enter: ")
