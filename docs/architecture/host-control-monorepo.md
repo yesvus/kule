@@ -12,8 +12,8 @@ Kule owns the MCP connection to clients, authentication, host inventory, per-hos
 
 ```text
 kule/
-  hub/       # Kule MCP HTTP/OAuth endpoint, inventory, outbound agent connections
-  agent/     # Kule host agent (adapted from pensados/sentinelx-cloud-core)
+  hub/       # MCP HTTP/OAuth endpoint, inventory, agent WebSocket listener/session registry
+  agent/     # Local host agent
   protocol/  # Versioned, shared agent↔hub messages/schemas
   docs/      # Architecture, operations, security, upstream attribution
   .github/   # CI that tests hub, agent, protocol and their compatibility
@@ -34,15 +34,15 @@ The upstream agent [pensados/sentinelx-cloud-core](https://github.com/pensados/s
 
 - A small independently running user/service process on each enrolled Linux/macOS machine; support additional platforms only when verified.
 - An **outbound-only** authenticated TLS WebSocket to the Kule hub; no inbound SSH/MCP port or SSH jump-host chain required.
-- Reuse audited SentinelX host primitives and **local** command, path and service allowlists. The hub's permission check is additive, not a substitute for local policy.
+- Reuse host-management primitives from the upstream agent and **local** command, path and service allowlists. The hub's permission check is additive, not a substitute for local policy.
 - Explicit enrollment/rotation/revocation, distinct identity per host, bounded outputs/timeouts, no ambient root credentials, and fail-closed handling of lost connections.
 - Keep local break-glass SSH/console access for the owner independent from Kule availability.
 
 ### Protocol
 
-- Start from the **open-source** `sentinelx-cloud-protocol` schemas/bindings and adapt only where necessary.
+- Start from the pinned open-source upstream protocol schemas/bindings and adapt only where necessary.
 - Strict message validation, request IDs, version compatibility, replay handling, max frame sizes, cancellation and response correlation.
-- Identity tokens issued and validated by **our own hub**, pinned to the enrolled host and revocable; never accept the hosted SentinelX issuer as authority.
+- Identity tokens issued and validated by **our own Hub**, pinned to the enrolled host and revocable; never accept a third-party identity issuer as authority.
 - Cross-package contract tests for handshake, invalid/expired credentials, wrong host, unauthorized operation, interrupted connection and schema drift.
 
 ## Authorization and safety invariants
@@ -56,7 +56,7 @@ The upstream agent [pensados/sentinelx-cloud-core](https://github.com/pensados/s
 
 ## Migration (all via reviewable PRs)
 
-1. Document the boundary and monorepo directory ownership; close the obsolete broad trust-topology RFC.
+1. Document the boundary and monorepo directory ownership; close the obsolete gateway-topology proposal (#19).
 2. Import/pin the open-source protocol and agent into `protocol/` and `agent/`, with license and upstream sync metadata. **No network enrollment or execution activation at import.**
 3. Move the existing OIDC, middleware and audit code under `hub/`, implement the hub's WebSocket session registry and typed host routing, and add contract tests.
 4. Remove old OpenHands/worker/workspace orchestration, Kubernetes/Argo CD proxy modules, unnecessary Docker stages, tests and docs from Kule. Stand up those MCP services separately where desired.
