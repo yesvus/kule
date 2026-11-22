@@ -1,0 +1,62 @@
+[
+  {
+    "name": "bug",
+    "color": "D73A4A",
+    "description": "Something is not working"
+  },
+  {
+    "name": "enhancement",
+    "color": "A2EEEF",
+    "description": "New feature or improvement"
+  },
+  {
+    "name": "maintenance",
+    "color": "C9B4ED",
+    "description": "Repository upkeep, documentation infrastructure, or design housekeeping"
+  },
+  {
+    "name": "needs-triage",
+    "color": "D0D7DE",
+    "description": "Scope, area, or next action has not been triaged"
+  },
+  {
+    "name": "security-review",
+    "color": "B42318",
+    "description": "Review identity, host privileges, execution, enrollment, credentials, or audit controls"
+  },
+  {
+    "name": "area:auth",
+    "color": "8250DF",
+    "description": "OAuth, OIDC, identity, sessions, and login"
+  },
+  {
+    "name": "area:host",
+    "color": "1F883D",
+    "description": "Host enrollment, execution, recovery, and agent behavior"
+  },
+  {
+    "name": "area:transport",
+    "color": "0E8A9B",
+    "description": "MCP connectivity, tunnels, and network transport"
+  },
+  {
+    "name": "area:audit",
+    "color": "BF8700",
+    "description": "Audit logging, redaction, and policy enforcement"
+  },
+  {
+    "name": "area:ci",
+    "color": "0969DA",
+    "description": "Builds, packaging, tests, and automation"
+  },
+  {
+    "name": "area:docs",
+    "color": "1F6FEB",
+    "description": "User-facing documentation and examples"
+  },
+  {
+    "name": "area:repo",
+    "color": "57606A",
+    "description": "Repository governance, issue hygiene, and maintenance"
+  }
+]
