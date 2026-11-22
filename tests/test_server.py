@@ -241,3 +241,25 @@ def test_single_host_marker_cannot_be_overridden_by_environment(
     monkeypatch.setenv("KULE_K8S_API_URL", "https://localhost:6443")
     with pytest.raises(RuntimeError, match="Single-host Kule image"):
         build_server(make_cfg(), claims_getter=claims)
+
+
+async def test_single_host_image_retains_opt_in_ssh_tool(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    from kule.tools import host_exec as ssh_tool
+
+    monkeypatch.setenv("KULE_SINGLE_HOST_IMAGE", "1")
+    monkeypatch.setenv("KULE_HOST_EXEC_ENABLED", "1")
+    monkeypatch.setenv("KULE_HOST_EXEC_TARGET", "operator@host.example.com")
+    for name in ("id_ed25519", "known_hosts", "ssh"):
+        (tmp_path / name).touch()
+    monkeypatch.setattr(ssh_tool, "_KEY", tmp_path / "id_ed25519")
+    monkeypatch.setattr(ssh_tool, "_KNOWN_HOSTS", tmp_path / "known_hosts")
+    monkeypatch.setattr(ssh_tool, "_SSH", str(tmp_path / "ssh"))
+
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=45)
+    claims.value = {**OPERATOR, "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+    async with Client(mcp) as client:
+        names = {tool.name for tool in await client.list_tools()}
+    assert names == {"whoami", "note_write", "host_exec"}

@@ -73,7 +73,7 @@ Sign in, verify whoami from your client, and check that an unauthenticated reque
 
 ## Container distribution
 
-The public GHCR image is built from `Dockerfile.single-host`. It includes Python, Kule, and the OpenSSH client, while excluding the legacy Kubernetes MCP and Argo CD runtime binaries. Kubernetes, workspace, and OpenHands integrations are intentionally unavailable in this image; explicitly enabling them will fail at startup instead of returning partial tool behavior. The older `Dockerfile` remains available to maintainers working on integrations.
+The public GHCR image is built from `Dockerfile.single-host`. It includes Python, Kule, and the OpenSSH client, while excluding the legacy Kubernetes MCP and Argo CD runtime binaries. Kubernetes, Argo CD, workspace, and OpenHands integrations are intentionally unavailable in this image; explicitly enabling them will fail at startup instead of returning partial tool behavior. The older `Dockerfile` remains available to maintainers working on integrations.
 
 For a new installation, mount a persistent private volume at `/var/lib/kule`; the container runs as UID/GID `10001`, and the image provides a writable `/var/lib/kule` directory. Generate or mount the configuration at `/var/lib/kule/config.toml` (the container's default config path); state and audit directories created by `kule init` then stay under `/var/lib/kule/.local/kule`. Ensure any externally mounted volume is writable only by the intended container identity.
 
