@@ -16,9 +16,9 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from fastmcp.utilities.versions import VersionSpec
 
-from operator_mcp.authz import Policy, Role
-from operator_mcp.config import ConfigError, load_config
-from operator_mcp.integrations import (
+from kule.authz import Policy, Role
+from kule.config import ConfigError, load_config
+from kule.integrations import (
     Capability,
     Integration,
     IntegrationRegistry,
@@ -26,8 +26,8 @@ from operator_mcp.integrations import (
     integration_tag,
     is_integration_tool,
 )
-from operator_mcp.middleware import _requested_version
-from operator_mcp.server import build_server
+from kule.middleware import _requested_version
+from kule.server import build_server
 
 NOW = 1_700_000_000.0
 DEV = "mcp-developers"
@@ -203,8 +203,8 @@ developer_group = "mcp-breakglass"
 """
     )
     env = {
-        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "s",
-        "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 32,
+        "KULE_OIDC_CLIENT_SECRET": "s",
+        "KULE_JWT_SIGNING_KEY": "k" * 32,
     }
     cfg = load_config(cfg_path, env)
     assert cfg.auth.developer_group == "mcp-breakglass"
@@ -228,8 +228,8 @@ client_id = "c"
 """
     )
     env = {
-        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "s",
-        "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 32,
+        "KULE_OIDC_CLIENT_SECRET": "s",
+        "KULE_JWT_SIGNING_KEY": "k" * 32,
     }
     cfg = load_config(cfg_path, env)
     assert cfg.tools.developer_enabled is False
@@ -252,8 +252,8 @@ developer_isolation_verified = true
 """
     )
     env = {
-        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "s",
-        "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 32,
+        "KULE_OIDC_CLIENT_SECRET": "s",
+        "KULE_JWT_SIGNING_KEY": "k" * 32,
     }
     with pytest.raises(
         ConfigError, match="developer_isolation_verified requires developer_enabled"

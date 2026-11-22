@@ -9,8 +9,8 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from helpers import OPERATOR, OUTSIDER
 
-from operator_mcp.server import build_server
-from operator_mcp.tools import host_exec
+from kule.server import build_server
+from kule.tools import host_exec
 
 
 async def test_host_exec_default_off(make_cfg, claims, monkeypatch):

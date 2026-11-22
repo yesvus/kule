@@ -1,6 +1,6 @@
 import pytest
 
-from operator_mcp.authz import EXEC, OPERATE, READ, Policy
+from kule.authz import EXEC, OPERATE, READ, Policy
 
 P = Policy(required_group="ops", exec_group="ops-exec", exec_enabled=True)
 

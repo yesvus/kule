@@ -10,8 +10,8 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from helpers import OPERATOR, OUTSIDER
 
-from operator_mcp.server import build_server
-from operator_mcp.tools import kubernetes
+from kule.server import build_server
+from kule.tools import kubernetes
 
 
 def _fixture_data(path: str) -> list[dict]:
@@ -47,7 +47,7 @@ def _fixture_data(path: str) -> list[dict]:
     if path.startswith("/apis/apps/v1/deployments"):
         return [
             {
-                "metadata": {"name": "operator-mcp", "namespace": "mcp-system"},
+                "metadata": {"name": "kule", "namespace": "mcp-system"},
                 "spec": {"replicas": 1},
                 "status": {"availableReplicas": 1},
             },

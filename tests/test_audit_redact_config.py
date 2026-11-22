@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.config import ConfigError, load_config
-from operator_mcp.redact import MASK, redact, redact_text
+from kule.audit import AuditLog, verify
+from kule.config import ConfigError, load_config
+from kule.redact import MASK, redact, redact_text
 
 
 def test_audit_chain_detects_edits(tmp_path: Path):
@@ -53,7 +53,7 @@ oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
 client_id = "c"
 """
 
-ENV = {"OPERATOR_MCP_OIDC_CLIENT_SECRET": "s", "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 32}
+ENV = {"KULE_OIDC_CLIENT_SECRET": "s", "KULE_JWT_SIGNING_KEY": "k" * 32}
 
 
 def write(tmp_path, text):
@@ -73,7 +73,7 @@ def test_config_loads_with_env_secrets(tmp_path):
     [
         ('[server]\nhost = "0.0.0.0"\n', ENV, "loopback"),
         ("", {}, "CLIENT_SECRET"),
-        ("", {**ENV, "OPERATOR_MCP_JWT_SIGNING_KEY": "short"}, "32 characters"),
+        ("", {**ENV, "KULE_JWT_SIGNING_KEY": "short"}, "32 characters"),
     ],
 )
 def test_config_rejects_unsafe_settings(tmp_path, extra, env, msg):
@@ -182,7 +182,7 @@ def test_config_rejects_bad_port_and_groups_and_redirects(tmp_path):
 
 
 def test_cli_reports_errors_without_traceback(tmp_path, capsys):
-    from operator_mcp.cli import main
+    from kule.cli import main
 
     assert main(["audit-verify", str(tmp_path / "missing.jsonl")]) == 2
     bad = tmp_path / "bad.toml"
