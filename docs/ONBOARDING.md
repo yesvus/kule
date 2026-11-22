@@ -9,7 +9,7 @@ Kule provides an authenticated MCP endpoint for managing an approved host. The f
 - An HTTPS origin for Kule's public endpoint, with a TLS-terminating reverse proxy
 - A writable directory for persistent OAuth state and audit records
 
-Configure your identity provider once during initial setup. Match the provider's allowed redirects to the MCP clients you intend to use.
+Configure your identity provider once during initial setup. Register Kule's own upstream OAuth callback URL, `https://mcp.example.com/auth/callback` (replace the origin with `server.public_url`), as an allowed redirect URI **in the identity provider's OAuth client**. MCP-client callback URLs are a separate layer: Kule validates them using `auth.allowed_client_redirect_uris`; do not register those MCP-client URLs in your identity provider's upstream OAuth client.
 
 ## 1. Install
 
@@ -33,12 +33,14 @@ For scripts and CI, supply all three without prompting:
 kule init --config config.toml \
   --public-url https://mcp.example.com \
   --oidc-config-url https://id.example.com/.well-known/openid-configuration \
-  --client-id kule
+  --client-id kule \
+  --required-group kule-users \
+  --exec-group kule-exec
 ~~~
 
 The initializer creates a configuration file with mode 0600 and private state/audit/scratch directories under .local/kule/. It refuses to overwrite an existing file or symlink. It does not register an OIDC client, save credentials, or expose new ports.
 
-Check the generated required_group and exec_group values against the OIDC groups you intend to authorize. Execution is disabled by default.
+The `--required-group` and `--exec-group` options default to `kule-users` and `kule-exec`. Set them to distinct, actual groups issued by your identity provider. Check the generated `required_group` and `exec_group` values against the OIDC groups you intend to authorize. Execution is disabled by default.
 
 ## 3. Supply secrets
 

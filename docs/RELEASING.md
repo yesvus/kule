@@ -15,11 +15,12 @@ Kule's first public version is planned as **v0.1.0**, an early single-host relea
 
 ## Release procedure (after gates pass)
 
-1. Open a reviewable PR that changes the package version from 0.1.0.dev0 to 0.1.0, updates the changelog and documentation, and records completed release evidence.
-2. Merge only after lint, Python 3.11/3.12/3.13/3.15 tests, and the multi-architecture container build pass on the exact release commit.
-3. Tag the reviewed release commit v0.1.0 and create a GitHub Release with known limitations and verification notes.
-4. Verify the published GHCR image digest and its supported architectures; link the immutable digest in the release notes.
-5. Validate a clean installation against the released artifact, including authentication and rollback/recovery steps.
+1. Open a reviewable PR that changes the package version from 0.1.0.dev0 to 0.1.0, drafts the release notes in `docs/releases/v0.1.0.md`, updates documentation, and records completed release evidence.
+2. Require lint, Python 3.11/3.12/3.13/3.15 tests, and the multi-architecture container build on the release PR; merge after review.
+3. Recheck those same tests and the container build on the **landed commit on `main`** before creating its `v0.1.0` tag. A green PR head alone does not verify a squash/merge commit.
+4. Tag the verified `main` commit and create a GitHub Release using `docs/releases/v0.1.0.md`, including known limitations and verification notes.
+5. Verify the published GHCR image digest and its supported architectures; link the immutable digest in the release notes.
+6. Validate a clean installation against the released artifact, including authentication and rollback/recovery steps.
 
 Publishing a GitHub Release is distinct from publishing to PyPI or rolling out to a running Kubernetes cluster. Deployment promotion requires its own reviewed GitOps change. A version tag must not trigger an implicit production rollout.
 

@@ -48,7 +48,7 @@ kule doctor --config config.toml
 kule serve --config config.toml
 ```
 
-Generate the signing key once, store it in your secret manager, and reuse the same value across restarts. Rotating it invalidates existing OAuth state. Connect your MCP client to `https://your-domain.example/mcp`. Keep host execution disabled until its access policy and SSH identity are configured.
+`kule doctor` is an offline preflight: it does not verify OIDC reachability or an actual client login. Generate the signing key once, store it in your secret manager, and reuse the same value across restarts. Rotating it invalidates existing OAuth state. Connect your MCP client to `https://your-domain.example/mcp`. Keep host execution disabled until its access policy and SSH identity are configured.
 
 For local development:
 
