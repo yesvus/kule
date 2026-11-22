@@ -1,0 +1,67 @@
+name: Feature proposal
+description: Suggest an improvement to Kule host management.
+title: "feat: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the user problem and expected behavior. Do not include credentials, private host details, or vulnerability reproductions here.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Component
+      options:
+        - Authentication
+        - Host execution
+        - Transport
+        - Audit and authorization
+        - CI and packaging
+        - Documentation
+        - Other or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Who needs this, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the interface and user experience; include alternatives where helpful.
+    validations:
+      required: true
+  - type: dropdown
+    id: effects
+    attributes:
+      label: Host-side impact
+      options:
+        - Read-only observation
+        - Changes host state
+        - Both
+        - Not applicable or unknown
+    validations:
+      required: true
+  - type: input
+    id: role
+    attributes:
+      label: Required caller role
+      placeholder: "operator, developer, public, or to be determined"
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security considerations
+      description: Note changes to authentication, authorization, privileges, enrollment, secrets, or audit.
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable success and rejection cases.
+    validations:
+      required: true

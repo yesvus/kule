@@ -1,0 +1,50 @@
+name: Maintenance or RFC
+description: Track documentation, maintenance work, or a design discussion.
+title: "chore: "
+labels: ["maintenance", "needs-triage"]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Component
+      options:
+        - Authentication
+        - Host execution
+        - Transport
+        - Audit and authorization
+        - CI and packaging
+        - Repository maintenance
+        - Documentation
+        - Other or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Context and goal
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Proposed scope or open questions
+      description: Keep an RFC exploratory; state decisions separately from questions.
+    validations:
+      required: true
+  - type: textarea
+    id: done
+    attributes:
+      label: Completion criteria
+      description: Define evidence needed before closing this issue.
+    validations:
+      required: true
+  - type: dropdown
+    id: security
+    attributes:
+      label: Security or privilege changes expected?
+      options:
+        - "No"
+        - "Yes"
+        - Unknown
+    validations:
+      required: true

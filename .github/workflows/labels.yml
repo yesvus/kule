@@ -1,0 +1,37 @@
+name: Sync issue labels
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/labels.json
+      - .github/workflows/labels.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('node:fs');
+            const labels = JSON.parse(fs.readFileSync('.github/labels.json', 'utf8'));
+            for (const { name, color, description } of labels) {
+              try {
+                await github.rest.issues.updateLabel({
+                  ...context.repo, name, color, description
+                });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                await github.rest.issues.createLabel({
+                  ...context.repo, name, color, description
+                });
+              }
+            }

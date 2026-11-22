@@ -29,3 +29,15 @@ The project uses Apache-2.0. By contributing, you agree that your contribution i
 ## Security
 
 Please use the private reporting process in [SECURITY.md](SECURITY.md) for vulnerabilities.
+
+## Issue triage
+
+Use the **Bug report**, **Feature proposal**, or **Maintenance or RFC** issue form. Search for duplicates first and keep sensitive vulnerability reports in [GitHub Security Advisories](https://github.com/yesvus/kule/security/advisories/new).
+
+- The issue form applies `bug`, `enhancement`, or `maintenance`, plus `needs-triage`. These classification labels are used for filtering; no title prefix is required.
+- Maintainers assign **one** `area:*` label after triage: `auth`, `host`, `transport`, `audit`, `ci`, `docs`, or `repo`. The dropdown in each form is context for triage, not an automatically assigned label.
+- Add `security-review` to changes touching host privileges, execution, enrollment, OAuth, role policy, credentials, or audit controls. A review must happen before implementation or deployment.
+- Remove `needs-triage` when scope and security impact are understood; assign an owner when work is accepted, not merely when the issue is filed. Cross-reference related issues instead of duplicating their scope.
+- Use priority only when an active maintainer commits to a delivery order; do not create priority labels just to populate every issue.
+
+The repository's label names, descriptions, and colors are maintained in [`.github/labels.json`](.github/labels.json) and synchronized by a main-branch workflow. This workflow does not automatically close, prioritize, or assign issues.

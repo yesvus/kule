@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible problem in Kule.
+title: "bug: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. For security vulnerabilities, use the private reporting link in SECURITY.md instead of a public issue.
+  - type: dropdown
+    id: area
+    attributes:
+      label: Component
+      options:
+        - Authentication
+        - Host execution
+        - Transport
+        - Audit and authorization
+        - CI and packaging
+        - Documentation
+        - Other or unknown
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: Actual behavior
+      description: What happened? Include the error message without credentials or private host details.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal safe reproduction and sanitized configuration.
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: MCP client and version
+      placeholder: "ChatGPT, Claude, or another client; include version if known"
+  - type: input
+    id: version
+    attributes:
+      label: Kule version or commit
+      placeholder: "Commit SHA, tag, or unknown"
+  - type: dropdown
+    id: privilege
+    attributes:
+      label: Does this involve privileged host operations?
+      options:
+        - "No"
+        - "Yes"
+        - Unknown
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs or screenshots, never credentials, tokens, keys or host-private information.
