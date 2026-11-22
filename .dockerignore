@@ -11,7 +11,7 @@ tests
 *.egg-info
 config.toml
 .local
-*.pem
-*.key
+**/*.pem
+**/*.key
 .env
 .env.*

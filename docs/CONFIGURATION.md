@@ -27,4 +27,10 @@ kule serve --config config.toml
 
 Host execution is disabled by default. For the current SSH backend, enabling it requires both `tools.exec_enabled = true` and `KULE_HOST_EXEC_ENABLED=1`, plus a fixed `KULE_HOST_EXEC_TARGET=user@host` (a DNS hostname or IPv4 address; no IPv6 literal, port, path or SSH options). Set `tools.timeout_seconds` to at least 15 and keep `tools.developer_enabled = false` in this runtime. A dedicated SSH identity and pinned known-hosts file are expected at `/var/run/kule-host-ssh/`. Keep the service account restricted and allow execution only to the approved identity-provider group.
 
+## Upgrading an existing installation
+
+The default state directory, audit path and scratch directory retain their previous on-disk locations until an explicit migration is performed. This preserves persisted OAuth sessions, audit continuity and any existing `DISABLED` emergency-stop marker. Do not move these paths just to rename the package; set new paths explicitly only after migrating their contents and confirming the kill switch remains effective.
+
+Existing `OPERATOR_MCP_OIDC_CLIENT_SECRET` and `OPERATOR_MCP_JWT_SIGNING_KEY` environment variables remain supported during the transition. The new `KULE_*` variables take effect for new installations; conflicting old/new values are rejected at startup. Existing deployments also require explicit updates to the executable name, container image, and config mount paths before adopting the new image.
+
 Kule's public HTTP endpoint should normally bind to localhost behind a trusted TLS reverse proxy.

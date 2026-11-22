@@ -19,6 +19,7 @@ groups_claim = "groups"
 path = "./.local/audit.jsonl"
 
 [tools]
+scratch_dir = "./.local/scratch"
 exec_enabled = false
 timeout_seconds = 30
 max_output_bytes = 65536
