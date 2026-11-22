@@ -267,3 +267,25 @@ def test_doctor_rejects_invalid_endpoint_port(tmp_path, monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "99999" not in output
     assert "FAIL endpoint" in output
+
+
+def test_init_accepts_existing_local_directory_mode_0755(tmp_path):
+    local = tmp_path / ".local"
+    local.mkdir(mode=0o755)
+    local.chmod(0o755)
+    path = initialize(tmp_path)
+    assert path.exists()
+    assert stat.S_IMODE(local.stat().st_mode) == 0o755
+    for item in (local / "kule", local / "kule" / "state", local / "kule" / "audit"):
+        assert stat.S_IMODE(item.stat().st_mode) == 0o700
+
+
+def test_init_rejects_world_writable_local_ancestor(tmp_path, capsys):
+    local = tmp_path / ".local"
+    local.mkdir()
+    local.chmod(0o777)
+    path = tmp_path / "config.toml"
+    assert main(["init", "--config", str(path), *ARGS]) == 2
+    assert not path.exists()
+    assert not (local / "kule").exists()
+    assert "non-writable-by-others" in capsys.readouterr().err

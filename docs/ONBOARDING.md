@@ -40,7 +40,7 @@ kule init --config config.toml \
 
 The initializer creates a configuration file with mode 0600 and private state/audit/scratch directories under .local/kule/. It refuses to overwrite an existing file or symlink. It does not register an OIDC client, save credentials, or expose new ports.
 
-The `--required-group` and `--exec-group` options default to `kule-users` and `kule-exec`. Set them to distinct, actual groups issued by your identity provider. Check the generated `required_group` and `exec_group` values against the OIDC groups you intend to authorize. Execution is disabled by default.
+The `--required-group` and `--exec-group` options default to `kule-users` and `kule-exec`. Set them to distinct groups issued by your identity provider, and different from the reserved `mcp-workspace` and `mcp-developers` groups. Verify the generated `required_group` and `exec_group` values match your provider's groups. Host execution remains disabled by default.
 
 ## 3. Supply secrets
 

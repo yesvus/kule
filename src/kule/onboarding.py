@@ -89,8 +89,12 @@ def init_config(
     local = path.absolute().parent / ".local"
     if local.is_symlink():
         raise ConfigError("setup ancestor .local must not be a symbolic link")
+    if not local.exists():
+        local.mkdir(mode=0o700)
+    if not local.is_dir() or local.is_symlink() or stat.S_IMODE(local.stat().st_mode) & 0o022:
+        raise ConfigError("setup ancestor .local must be a non-writable-by-others directory")
     root = local / "kule"
-    directories = (local, root, root / "state", root / "audit", root / "scratch")
+    directories = (root, root / "state", root / "audit", root / "scratch")
     for directory in directories:
         _private_directory(directory)
 

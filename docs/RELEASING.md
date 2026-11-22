@@ -2,7 +2,7 @@
 
 Kule's first public version is planned as **v0.1.0**, an early single-host release.
 
-## Required release gates
+## Release gates (all required before tagging and publication)
 
 - [ ] Kule init and doctor pass test coverage and review.
 - [ ] Install from a clean environment with a separate test OIDC client; verify the full OAuth login and client tool call.
@@ -10,17 +10,17 @@ Kule's first public version is planned as **v0.1.0**, an early single-host relea
 - [ ] Verify the refresh path beyond a token expiry without manual reconnect.
 - [ ] Validate the Linux ARM64/AMD64 container image with its actual CLI and configuration; record the immutable image **index digest**.
 - [ ] Document runtime dependencies and remove unrelated experimental integrations from the release artifact or clearly isolate them.
-- [ ] Align Python package version, README install command, release notes, and container image tag.
+- [ ] Align the Python package version, README install command, and release notes with the verified image tag `ghcr.io/yesvus/kule:sha-<release-commit>` and its immutable index digest.
 - [ ] Complete code, security and CI reviews; retain a tested rollback path.
 
 ## Release procedure (after gates pass)
 
 1. Open a reviewable PR that changes the package version from 0.1.0.dev0 to 0.1.0, drafts the release notes in `docs/releases/v0.1.0.md`, updates documentation, and records completed release evidence.
-2. Require lint, Python 3.11/3.12/3.13/3.15 tests, and the multi-architecture container build on the release PR; merge after review.
-3. Recheck those same tests and the container build on the **landed commit on `main`** before creating its `v0.1.0` tag. A green PR head alone does not verify a squash/merge commit.
-4. Tag the verified `main` commit and create a GitHub Release using `docs/releases/v0.1.0.md`, including known limitations and verification notes.
-5. Verify the published GHCR image digest and its supported architectures; link the immutable digest in the release notes.
-6. Validate a clean installation against the released artifact, including authentication and rollback/recovery steps.
+2. Require lint, Python 3.11/3.12/3.13/3.14/3.15 tests, and the multi-architecture container build on the release PR; merge after review.
+3. Verify those same tests and the container build on the **landed commit on `main`**. Confirm `ghcr.io/yesvus/kule:sha-<release-commit>` was published by the main-branch workflow, inspect its ARM64/AMD64 platforms, and record the immutable OCI index digest. The SHA tag is the version's image reference; a `v0.1.0` container tag is not currently published. A passing PR head alone does not verify a squash/merge commit.
+4. Before tagging, complete the fresh-install, OAuth refresh/denial, emergency-stop, and rollback gates using the exact landed artifact.
+5. Tag the verified `main` commit `v0.1.0` and publish a GitHub Release using `docs/releases/v0.1.0.md`. Include the matching SHA image tag and pinned `ghcr.io/yesvus/kule@sha256:<index-digest>` reference, supported architectures, limitations, and evidence.
+6. After publication, verify the GitHub Release points to the tested commit and that the immutable digest still resolves to both supported architectures.
 
 Publishing a GitHub Release is distinct from publishing to PyPI or rolling out to a running Kubernetes cluster. Deployment promotion requires its own reviewed GitOps change. A version tag must not trigger an implicit production rollout.
 
