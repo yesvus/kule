@@ -30,6 +30,7 @@ LEGACY_SECRET_ENV = {
 }
 LEGACY_STATE_DIR = Path("/var/lib/operator-mcp")
 LEGACY_AUDIT_PATH = Path("/var/log/operator-mcp/audit.jsonl")
+SINGLE_HOST_IMAGE_MARKER = Path("/usr/local/share/kule/SINGLE_HOST_IMAGE")
 
 
 class ConfigError(ValueError):
@@ -173,6 +174,38 @@ def _secret_from_env(env: dict[str, str], name: str) -> str:
     return current or legacy
 
 
+def is_single_host_image(env: dict[str, str] | None = None) -> bool:
+    """A root-owned image marker cannot be disabled through environment overrides."""
+    env = os.environ if env is None else env
+    return SINGLE_HOST_IMAGE_MARKER.is_file() or env.get("KULE_SINGLE_HOST_IMAGE") == "1"
+
+
+def validate_single_host_integrations(
+    cfg: Config, env: dict[str, str] | None = None
+) -> bool:
+    """Fail closed on unsupported public-image integration configuration."""
+    env = os.environ if env is None else env
+    if not is_single_host_image(env):
+        return False
+    if (
+        cfg.tools.workspace_enabled
+        or cfg.tools.developer_enabled
+        or env.get("KULE_K8S_API_URL")
+        or any(
+            env.get(flag) == "1"
+            for flag in (
+                "KULE_K8S_UPSTREAM_ENABLED",
+                "KULE_ARGOCD_UPSTREAM_ENABLED",
+                "KULE_OPENHANDS_ENABLED",
+            )
+        )
+    ):
+        raise ConfigError(
+            "Single-host Kule image cannot enable Kubernetes, workspace, or agent integrations"
+        )
+    return True
+
+
 def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     with path.open("rb") as fh:
@@ -238,6 +271,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             raise ConfigError("KULE_WORKSPACE_POD differs from approved Pod")
     cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
     validate(cfg)
+    validate_single_host_integrations(cfg, env)
     return cfg
 
 

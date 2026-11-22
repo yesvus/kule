@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 from typing import Any
 
 from fastmcp import FastMCP, settings
@@ -12,7 +11,7 @@ from fastmcp.server.auth.oidc_proxy import OIDCProxy
 
 from .audit import AuditLog
 from .authz import Policy
-from .config import Config
+from .config import Config, validate_single_host_integrations
 from .integrations import IntegrationRegistry
 from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
 from .tools import (
@@ -24,8 +23,6 @@ from .tools import (
     upstream_kubernetes,
     workspace,
 )
-
-_SINGLE_HOST_MARKER = Path("/usr/local/share/kule/SINGLE_HOST_IMAGE")
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -79,26 +76,7 @@ def build_server(
     claims_getter: ClaimsGetter = claims_from_request,
     integrations: IntegrationRegistry | None = None,
 ) -> FastMCP:
-    # The public release image intentionally excludes the legacy
-    # Kubernetes/Argo CD/OpenHands toolchain. Refuse incompatible options
-    # rather than advertising tools that cannot run in this image.
-    single_host = _SINGLE_HOST_MARKER.is_file() or os.environ.get("KULE_SINGLE_HOST_IMAGE") == "1"
-    if single_host and (
-        cfg.tools.workspace_enabled
-        or cfg.tools.developer_enabled
-        or os.environ.get("KULE_K8S_API_URL")
-        or any(
-            os.environ.get(flag) == "1"
-            for flag in (
-                "KULE_K8S_UPSTREAM_ENABLED",
-                "KULE_ARGOCD_UPSTREAM_ENABLED",
-                "KULE_OPENHANDS_ENABLED",
-            )
-        )
-    ):
-        raise RuntimeError(
-            "Single-host Kule image cannot enable Kubernetes, workspace, or agent integrations"
-        )
+    single_host = validate_single_host_integrations(cfg)
 
     policy = Policy(
         required_group=cfg.auth.required_group,
