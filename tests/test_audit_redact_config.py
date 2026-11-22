@@ -265,3 +265,29 @@ def test_redact_keeps_colliding_keys():
 def test_config_rejects_bad_numbers_and_empty_paths(tmp_path, old, new, msg):
     with pytest.raises(ConfigError, match=msg):
         load_config(write(tmp_path, GOOD.replace(old, new, 1)), ENV)
+
+
+def test_legacy_config_defaults_preserve_state_and_audit(tmp_path):
+    from kule.config import LEGACY_AUDIT_PATH, LEGACY_STATE_DIR
+
+    cfg = load_config(write(tmp_path, GOOD), ENV)
+    assert cfg.server.state_dir == LEGACY_STATE_DIR
+    assert cfg.kill_switch_path == LEGACY_STATE_DIR / "DISABLED"
+    assert cfg.audit.path == LEGACY_AUDIT_PATH
+    assert cfg.tools.scratch_dir == LEGACY_STATE_DIR / "scratch"
+
+
+def test_legacy_environment_credentials_remain_supported(tmp_path):
+    legacy_env = {
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "old-client-secret",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "l" * 40,
+    }
+    cfg = load_config(write(tmp_path, GOOD), legacy_env)
+    assert cfg.auth.client_secret == "old-client-secret"
+    assert cfg.auth.jwt_signing_key == "l" * 40
+
+
+def test_conflicting_old_and_new_credentials_fail_closed(tmp_path):
+    env = {**ENV, "OPERATOR_MCP_OIDC_CLIENT_SECRET": "different"}
+    with pytest.raises(ConfigError, match="conflicting"):
+        load_config(write(tmp_path, GOOD), env)
