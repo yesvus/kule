@@ -189,9 +189,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         client_secret=env.get(SECRET_ENV["client_secret"], ""),
         jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
     )
-    audit = AuditConfig(
-        path=_path(au.get("path", "/var/log/kule/audit.jsonl"), "audit.path")
-    )
+    audit = AuditConfig(path=_path(au.get("path", "/var/log/kule/audit.jsonl"), "audit.path"))
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
         workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
@@ -203,9 +201,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         breakglass_max_ttl_seconds=_int(
             t.get("breakglass_max_ttl_seconds", 900), "tools.breakglass_max_ttl_seconds"
         ),
-        scratch_dir=_path(
-            t.get("scratch_dir", "/var/lib/kule/scratch"), "tools.scratch_dir"
-        ),
+        scratch_dir=_path(t.get("scratch_dir", "/var/lib/kule/scratch"), "tools.scratch_dir"),
         timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
         max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),
     )
