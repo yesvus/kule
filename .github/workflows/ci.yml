@@ -52,3 +52,50 @@ jobs:
         run: |
           kule --help
           kule check-config --config examples/config.example.toml
+
+
+  package-smoke:
+    # Exercise the built wheel in a new virtualenv, not an editable checkout.
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Build distribution wheel
+        run: |
+          mkdir -p "$RUNNER_TEMP/kule-wheels"
+          python -m pip wheel --no-deps --wheel-dir "$RUNNER_TEMP/kule-wheels" .
+      - name: Install wheel and verify first-run CLI without network services
+        env:
+          KULE_OIDC_CLIENT_SECRET: test-only-placeholder
+          KULE_JWT_SIGNING_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          python -m venv "$root/venv"
+          "$root/venv/bin/python" -m pip install "$RUNNER_TEMP"/kule-wheels/kule-*.whl
+          cd "$root"
+          "$root/venv/bin/kule" --help >/dev/null
+          "$root/venv/bin/kule" init \
+            --config "$root/config.toml" \
+            --public-url https://mcp.example.com \
+            --oidc-config-url https://id.example.com/.well-known/openid-configuration \
+            --client-id kule-smoke \
+            --required-group kule-users \
+            --exec-group kule-exec
+          "$root/venv/bin/kule" doctor --config "$root/config.toml"
+          "$root/venv/bin/kule" check-config --config "$root/config.toml"
+          test "$(stat -c '%a' "$root/config.toml")" = 600
+          test "$(stat -c '%a' "$root/.local/kule/state")" = 700
+          if grep -R -F -q "$KULE_OIDC_CLIENT_SECRET" "$root/config.toml" "$root/.local"; then
+            echo "OIDC secret was persisted during onboarding" >&2
+            exit 1
+          fi
+          if grep -R -F -q "$KULE_JWT_SIGNING_KEY" "$root/config.toml" "$root/.local"; then
+            echo "JWT signing key was persisted during onboarding" >&2
+            exit 1
+          fi
+          grep -F -x -q 'exec_enabled = false' "$root/config.toml"
