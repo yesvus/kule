@@ -5,6 +5,7 @@ Kule's first public version is planned as **v0.1.0**, an early single-host relea
 ## Release gates (all required before tagging and publication)
 
 - [ ] Kule init and doctor pass test coverage and review.
+- [ ] Built wheel installs into a clean virtual environment and its installed CLI passes first-run offline smoke tests (in addition to editable source tests).
 - [ ] Install from a clean environment with a separate test OIDC client; verify the full OAuth login and client tool call.
 - [ ] Verify wrong-group and anonymous denial, host execution disabled by default, audit, emergency stop, and persistent state across restart.
 - [ ] Verify the refresh path beyond a token expiry without manual reconnect.
