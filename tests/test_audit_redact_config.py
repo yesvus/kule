@@ -2,9 +2,9 @@ from pathlib import Path
 
 import pytest
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.config import ConfigError, load_config
-from operator_mcp.redact import MASK, redact, redact_text
+from kule.audit import AuditLog, verify
+from kule.config import ConfigError, load_config
+from kule.redact import MASK, redact, redact_text
 
 
 def test_audit_chain_detects_edits(tmp_path: Path):
@@ -53,7 +53,7 @@ oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
 client_id = "c"
 """
 
-ENV = {"OPERATOR_MCP_OIDC_CLIENT_SECRET": "s", "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 32}
+ENV = {"KULE_OIDC_CLIENT_SECRET": "s", "KULE_JWT_SIGNING_KEY": "k" * 32}
 
 
 def write(tmp_path, text):
@@ -73,7 +73,7 @@ def test_config_loads_with_env_secrets(tmp_path):
     [
         ('[server]\nhost = "0.0.0.0"\n', ENV, "loopback"),
         ("", {}, "CLIENT_SECRET"),
-        ("", {**ENV, "OPERATOR_MCP_JWT_SIGNING_KEY": "short"}, "32 characters"),
+        ("", {**ENV, "KULE_JWT_SIGNING_KEY": "short"}, "32 characters"),
     ],
 )
 def test_config_rejects_unsafe_settings(tmp_path, extra, env, msg):
@@ -182,7 +182,7 @@ def test_config_rejects_bad_port_and_groups_and_redirects(tmp_path):
 
 
 def test_cli_reports_errors_without_traceback(tmp_path, capsys):
-    from operator_mcp.cli import main
+    from kule.cli import main
 
     assert main(["audit-verify", str(tmp_path / "missing.jsonl")]) == 2
     bad = tmp_path / "bad.toml"
@@ -265,3 +265,39 @@ def test_redact_keeps_colliding_keys():
 def test_config_rejects_bad_numbers_and_empty_paths(tmp_path, old, new, msg):
     with pytest.raises(ConfigError, match=msg):
         load_config(write(tmp_path, GOOD.replace(old, new, 1)), ENV)
+
+
+def test_legacy_config_defaults_preserve_state_and_audit(tmp_path):
+    cfg = load_config(write(tmp_path, GOOD), ENV)
+    assert cfg.server.state_dir == Path("/var/lib/operator-mcp")
+    assert cfg.kill_switch_path == Path("/var/lib/operator-mcp/DISABLED")
+    assert cfg.audit.path == Path("/var/log/operator-mcp/audit.jsonl")
+    assert cfg.tools.scratch_dir == Path("/var/lib/operator-mcp/scratch")
+
+
+def test_legacy_environment_credentials_remain_supported(tmp_path):
+    legacy_env = {
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "old-client-secret",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "l" * 40,
+    }
+    cfg = load_config(write(tmp_path, GOOD), legacy_env)
+    assert cfg.auth.client_secret == "old-client-secret"
+    assert cfg.auth.jwt_signing_key == "l" * 40
+
+
+def test_conflicting_old_and_new_credentials_fail_closed(tmp_path):
+    env = {**ENV, "OPERATOR_MCP_OIDC_CLIENT_SECRET": "different"}
+    with pytest.raises(ConfigError, match="conflicting"):
+        load_config(write(tmp_path, GOOD), env)
+
+
+def test_empty_new_secret_falls_back_to_legacy_secret(tmp_path):
+    env = {
+        "KULE_OIDC_CLIENT_SECRET": "",
+        "KULE_JWT_SIGNING_KEY": "",
+        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "old-client-secret",
+        "OPERATOR_MCP_JWT_SIGNING_KEY": "l" * 40,
+    }
+    cfg = load_config(write(tmp_path, GOOD), env)
+    assert cfg.auth.client_secret == "old-client-secret"
+    assert cfg.auth.jwt_signing_key == "l" * 40

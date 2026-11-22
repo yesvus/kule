@@ -11,10 +11,10 @@ import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
-from operator_mcp.authz import WORKSPACE, Policy
-from operator_mcp.middleware import _audit_arguments
-from operator_mcp.server import build_server
-from operator_mcp.tools import workspace, workspace_runner
+from kule.authz import WORKSPACE, Policy
+from kule.middleware import _audit_arguments
+from kule.server import build_server
+from kule.tools import workspace, workspace_runner
 
 POD = "tezgah-7fd87c54-cr8dm"
 
@@ -213,7 +213,7 @@ async def test_mount_role_and_audit_do_not_leak_command_or_write_body(
 
 
 def test_workspace_check_config_requires_target_and_reports_own_url(tmp_path):
-    from operator_mcp.config import ConfigError, load_config
+    from kule.config import ConfigError, load_config
 
     config = tmp_path / "config.toml"
     config.write_text(
@@ -223,8 +223,8 @@ def test_workspace_check_config_requires_target_and_reports_own_url(tmp_path):
         "[tools]\nworkspace_enabled = true\n"
     )
     env = {
-        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "synthetic",
-        "OPERATOR_MCP_JWT_SIGNING_KEY": "x" * 40,
+        "KULE_OIDC_CLIENT_SECRET": "synthetic",
+        "KULE_JWT_SIGNING_KEY": "x" * 40,
     }
     with pytest.raises(ConfigError, match="KULE_WORKSPACE_API_URL"):
         load_config(config, env)
@@ -309,7 +309,7 @@ async def test_developer_group_lists_only_workspace_and_call_time_denies_operato
 
 
 def test_developer_feature_flag_cannot_enable_without_workspace_settings(tmp_path):
-    from operator_mcp.config import ConfigError, load_config
+    from kule.config import ConfigError, load_config
 
     file = tmp_path / "config.toml"
     file.write_text(
@@ -319,8 +319,8 @@ def test_developer_feature_flag_cannot_enable_without_workspace_settings(tmp_pat
         "[tools]\ndeveloper_enabled = true\n"
     )
     env = {
-        "OPERATOR_MCP_OIDC_CLIENT_SECRET": "synthetic",
-        "OPERATOR_MCP_JWT_SIGNING_KEY": "k" * 40,
+        "KULE_OIDC_CLIENT_SECRET": "synthetic",
+        "KULE_JWT_SIGNING_KEY": "k" * 40,
     }
     with pytest.raises(ConfigError, match="developer_enabled requires workspace_enabled"):
         load_config(file, env)

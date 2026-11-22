@@ -23,8 +23,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN apt-get update \
     && apt-get install -y --no-install-recommends openssh-client \
     && rm -rf /var/lib/apt/lists/*
-RUN groupadd --gid 10001 operator-mcp \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent operator-mcp
+RUN groupadd --gid 10001 kule \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent kule
 COPY --from=wheelhouse /wheelhouse /wheelhouse
 COPY --from=kubernetes-upstream /app/kubernetes-mcp-server /usr/local/bin/kubernetes-mcp-server
 # Exercise the pinned Go binary under each target architecture during CI build.
@@ -33,10 +33,10 @@ COPY --from=argocd-upstream /usr/local/bin/node /usr/local/bin/node
 COPY --from=argocd-upstream /opt/argocd-mcp/node_modules /opt/argocd-mcp/node_modules
 COPY contrib/kubernetes-upstream.toml /usr/local/share/kule/kubernetes-upstream.toml
 COPY contrib/kubernetes-workspace.toml /usr/local/share/kule/kubernetes-workspace.toml
-RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse operator-mcp \
+RUN python -m pip install --no-cache-dir --no-index --find-links=/wheelhouse kule \
     && rm -rf /wheelhouse \
     && node --version >/dev/null
 USER 10001:10001
 EXPOSE 8795
-ENTRYPOINT ["operator-mcp"]
-CMD ["serve", "--config", "/etc/operator-mcp/config.toml"]
+ENTRYPOINT ["kule"]
+CMD ["serve", "--config", "/etc/kule/config.toml"]

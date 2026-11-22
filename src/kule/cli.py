@@ -1,4 +1,4 @@
-"""Command line: `operator-mcp serve` and `operator-mcp audit-verify`."""
+"""Command line: `kule serve` and `kule audit-verify`."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .config import load_config
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="operator-mcp")
+    parser = argparse.ArgumentParser(prog="kule")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     serve = sub.add_parser("serve", help="run the MCP server (Streamable HTTP on loopback)")

@@ -5,8 +5,8 @@ from fastmcp import Client
 from fastmcp.exceptions import ToolError
 from helpers import OPERATOR, OUTSIDER
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.server import build_server
+from kule.audit import AuditLog, verify
+from kule.server import build_server
 
 
 @pytest.fixture
@@ -139,7 +139,7 @@ def _extra_tools(mcp):
 
 
 async def test_output_cap_timeout_and_inner_timeout(make_cfg, claims):
-    from operator_mcp.server import build_server
+    from kule.server import build_server
 
     cfg = make_cfg(timeout_seconds=1.0)
     mcp = build_server(cfg, claims_getter=claims)
@@ -176,7 +176,7 @@ async def test_whoami_falls_back_to_subject(server, claims):
 def test_fastmcp_home_is_forced(make_cfg, monkeypatch):
     import os
 
-    from operator_mcp import server as srv
+    from kule import server as srv
 
     monkeypatch.setenv("FASTMCP_HOME", "/elsewhere")
     cfg = make_cfg()

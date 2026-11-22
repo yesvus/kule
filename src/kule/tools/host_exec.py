@@ -1,9 +1,10 @@
-"""Owner-controlled Gurbet shell via the existing SSH service."""
+"""Bounded host execution through a preconfigured SSH target."""
 
 from __future__ import annotations
 
 import asyncio
 import os
+import re
 from contextlib import suppress
 from pathlib import Path
 
@@ -15,7 +16,16 @@ from ..redact import redact_text
 
 _KEY = Path("/var/run/kule-host-ssh/id_ed25519")
 _KNOWN_HOSTS = Path("/var/run/kule-host-ssh/known_hosts")
-_TARGET = "yesvus@100.82.175.48"
+_TARGET_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.-]*$")
+
+
+def _configured_target() -> str:
+    target = os.environ.get("KULE_HOST_EXEC_TARGET", "")
+    if not _TARGET_PATTERN.fullmatch(target):
+        raise RuntimeError("KULE_HOST_EXEC_TARGET must be a fixed user@host SSH target")
+    return target
+
+
 _MAX_SCRIPT = 16384
 _SSH = "/usr/bin/ssh"
 
@@ -48,7 +58,7 @@ def _argv(seconds: int) -> list[str]:
         "ServerAliveCountMax=1",
         "-i",
         str(_KEY),
-        _TARGET,
+        _configured_target(),
         f"exec /usr/bin/timeout --kill-after=2s {seconds}s /bin/bash --noprofile --norc -s",
     ]
 
@@ -93,7 +103,7 @@ async def _run(script: bytes, seconds: int, max_bytes: int) -> dict:
                 proc.kill()
             await proc.communicate()
     return {
-        "host": "gurbet",
+        "host": "configured-host",
         "returncode": code,
         "output": redact_text(output.decode("utf-8", errors="replace")),
         "truncated": truncated,
@@ -103,16 +113,17 @@ async def _run(script: bytes, seconds: int, max_bytes: int) -> dict:
 def register(mcp: FastMCP, cfg: Config) -> None:
     if not cfg.tools.exec_enabled or os.environ.get("KULE_HOST_EXEC_ENABLED") != "1":
         return
+    _configured_target()
     if cfg.tools.developer_enabled:
-        raise RuntimeError("Gurbet host shell must not share an enabled developer runtime")
+        raise RuntimeError("Host shell must not share an enabled developer runtime")
     if cfg.tools.timeout_seconds < 15:
-        raise RuntimeError("Gurbet host shell requires at least 15 seconds of tool timeout")
+        raise RuntimeError("Host shell requires at least 15 seconds of tool timeout")
     if not (_KEY.is_file() and _KNOWN_HOSTS.is_file() and Path(_SSH).is_file()):
-        raise RuntimeError("Gurbet SSH executor prerequisites are missing")
+        raise RuntimeError("Host SSH executor prerequisites are missing")
 
     @mcp.tool(tags={EXEC}, annotations={"readOnlyHint": False, "destructiveHint": True})
     async def host_exec(script: str) -> dict:
-        """Execute a bounded Bash script as the trusted Gurbet host operator.
+        """Execute a bounded Bash script on the configured, authorized host.
 
         Broad host and Kubernetes authority; not a sandbox. Never return secret
         material. Do not use this tool from an untrusted developer session.

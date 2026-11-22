@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from operator_mcp.config import AuditConfig, AuthConfig, Config, ServerConfig, ToolsConfig
+from kule.config import AuditConfig, AuthConfig, Config, ServerConfig, ToolsConfig
 
 
 @pytest.fixture

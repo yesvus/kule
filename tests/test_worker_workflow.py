@@ -10,8 +10,8 @@ from uuid import UUID, uuid4
 import httpx2
 import pytest
 
-from operator_mcp import worker_workflow as ww
-from operator_mcp.worker_workflow import (
+from kule import worker_workflow as ww
+from kule.worker_workflow import (
     DEFAULT_MODEL,
     WorkerClient,
     WorkerError,

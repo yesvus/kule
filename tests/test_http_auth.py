@@ -19,7 +19,7 @@ import httpx2
 import pytest
 from fastmcp import settings
 
-from operator_mcp.server import build_auth, build_server
+from kule.server import build_auth, build_server
 
 PUBLIC_URL = "https://mcp.example.com"
 MCP_HEADERS = {

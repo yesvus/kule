@@ -187,7 +187,7 @@ class OperatorMiddleware(Middleware):
 
         if self.kill_switch.exists():
             await self._audit("denied", reason="kill switch", args=audit_args, **who)
-            raise AuthorizationError("operator-mcp is disabled by the kill switch")
+            raise AuthorizationError("kule is disabled by the kill switch")
 
         tool = None
         if context.fastmcp_context is not None:
@@ -253,7 +253,7 @@ class OperatorMiddleware(Middleware):
         # also stop the pending call. Already dispatched calls are not cancelled.
         if self.kill_switch.exists():
             await self._audit("denied", reason="kill switch", args=audit_args, **who)
-            raise AuthorizationError("operator-mcp is disabled by the kill switch")
+            raise AuthorizationError("kule is disabled by the kill switch")
 
         start = time.monotonic()
         # The deadline stops awaiting the tool. A synchronous tool already

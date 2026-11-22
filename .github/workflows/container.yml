@@ -33,7 +33,7 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name == 'push' }}
-          tags: ghcr.io/yesvus/operator-mcp:sha-${{ github.sha }}
+          tags: ghcr.io/yesvus/kule:sha-${{ github.sha }}
       - name: Report immutable digest for GitOps promotion
         if: github.event_name == 'push'
         run: echo "OCI_INDEX_DIGEST=${{ steps.image.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"

@@ -101,7 +101,7 @@ def build_server(
         integrations=integrations if integrations is not None else IntegrationRegistry(),
     )
     mcp = FastMCP(
-        name="operator-mcp",
+        name="kule",
         instructions=INSTRUCTIONS,
         auth=auth,
         middleware=[middleware],

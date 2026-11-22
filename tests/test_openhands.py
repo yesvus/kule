@@ -16,11 +16,11 @@ from fastmcp import Client, FastMCP
 from fastmcp.exceptions import AuthorizationError, ToolError
 from helpers import OPERATOR, OUTSIDER
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.authz import Policy
-from operator_mcp.middleware import OperatorMiddleware
-from operator_mcp.server import build_server
-from operator_mcp.tools import openhands
+from kule.audit import AuditLog, verify
+from kule.authz import Policy
+from kule.middleware import OperatorMiddleware
+from kule.server import build_server
+from kule.tools import openhands
 
 ORIGIN = "https://canvas.example.test:8000"
 CONVERSATION = "11111111-1111-1111-1111-111111111111"
@@ -1261,7 +1261,7 @@ def test_explicit_canvas_ca_bundle_is_validated(tmp_path, monkeypatch):
 
 
 def test_enabled_check_config_validates_canvas_settings(tmp_path, monkeypatch, capsys):
-    from operator_mcp.cli import main
+    from kule.cli import main
 
     config = tmp_path / "config.toml"
     config.write_text(
@@ -1273,8 +1273,8 @@ oidc_config_url = "https://id.example.com/.well-known/openid-configuration"
 client_id = "client"
 """
     )
-    monkeypatch.setenv("OPERATOR_MCP_OIDC_CLIENT_SECRET", "secret")
-    monkeypatch.setenv("OPERATOR_MCP_JWT_SIGNING_KEY", "k" * 32)
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "k" * 32)
     monkeypatch.setenv("KULE_OPENHANDS_ENABLED", "1")
     for name in (
         "KULE_OPENHANDS_REPOSITORIES",

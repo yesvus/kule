@@ -1,9 +1,9 @@
 # Kule Agent
 
-The planned local host agent for Kule-managed machines.
+The planned host-resident process for Kule-managed machines.
 
-**Current status:** architecture skeleton only; upstream code has **not** yet been copied or modified. Initial import must retain license/attribution/modification notices, record upstream revision, and pass a security review.
+Each agent is designed to initiate an outbound authenticated TLS WebSocket (`wss://`) session to its Hub, identify its enrolled host, and enforce local allowlists for command, file and service operations. Unenrolled or disconnected agents will reject remote calls. Execution will be bounded by host-specific policy; independent SSH/console access will remain available to the host owner.
 
-The agent runs on an explicitly enrolled host, connects **outbound** to the Hub via authenticated TLS WebSocket (`wss://`), and applies local allowlists to host commands, filesystem and service operations. Independent SSH/console recovery remains available to the owner. A disconnected or unregistered agent has no authority to run calls.
+The dedicated agent package is in development.
 
-See [architecture](../docs/architecture/host-control-monorepo.md).
+See the [architecture](../docs/architecture/host-control-monorepo.md).

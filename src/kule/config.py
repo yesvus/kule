@@ -18,9 +18,18 @@ DEFAULT_ALLOWED_CLIENT_REDIRECTS = [
 ]
 
 SECRET_ENV = {
+    "client_secret": "KULE_OIDC_CLIENT_SECRET",
+    "jwt_signing_key": "KULE_JWT_SIGNING_KEY",
+}
+
+# Existing installations can keep their state, audit chain and credentials
+# until their configuration and persistent volume are explicitly migrated.
+LEGACY_SECRET_ENV = {
     "client_secret": "OPERATOR_MCP_OIDC_CLIENT_SECRET",
     "jwt_signing_key": "OPERATOR_MCP_JWT_SIGNING_KEY",
 }
+LEGACY_STATE_DIR = Path("/var/lib/operator-mcp")
+LEGACY_AUDIT_PATH = Path("/var/log/operator-mcp/audit.jsonl")
 
 
 class ConfigError(ValueError):
@@ -59,7 +68,7 @@ class ServerConfig:
     allow_pod_bind: bool = False
     port: int = 8795
     public_url: str = ""
-    state_dir: Path = Path("/var/lib/operator-mcp")
+    state_dir: Path = LEGACY_STATE_DIR
 
 
 @dataclass(frozen=True)
@@ -81,13 +90,13 @@ class AuthConfig:
 
 @dataclass(frozen=True)
 class AuditConfig:
-    path: Path = Path("/var/log/operator-mcp/audit.jsonl")
+    path: Path = LEGACY_AUDIT_PATH
 
 
 @dataclass(frozen=True)
 class ToolsConfig:
     exec_enabled: bool = False
-    scratch_dir: Path = Path("/var/lib/operator-mcp/scratch")
+    scratch_dir: Path = LEGACY_STATE_DIR / "scratch"
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
     workspace_enabled: bool = False
@@ -156,6 +165,14 @@ def _string_list(value: object, name: str) -> list[str]:
     return list(value)
 
 
+def _secret_from_env(env: dict[str, str], name: str) -> str:
+    current = env.get(SECRET_ENV[name], "")
+    legacy = env.get(LEGACY_SECRET_ENV[name], "")
+    if current and legacy and current != legacy:
+        raise ConfigError(f"{name} has conflicting current and legacy environment values")
+    return current or legacy
+
+
 def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     with path.open("rb") as fh:
@@ -171,7 +188,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         allow_pod_bind=_bool(s.get("allow_pod_bind", False), "server.allow_pod_bind"),
         port=_int(s.get("port", 8795), "server.port"),
         public_url=_str(s.get("public_url", ""), "server.public_url").rstrip("/"),
-        state_dir=_path(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir"),
+        state_dir=_path(s.get("state_dir", str(LEGACY_STATE_DIR)), "server.state_dir"),
     )
     auth = AuthConfig(
         oidc_config_url=_str(a.get("oidc_config_url", ""), "auth.oidc_config_url"),
@@ -186,12 +203,10 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             a.get("allowed_client_redirect_uris", DEFAULT_ALLOWED_CLIENT_REDIRECTS),
             "auth.allowed_client_redirect_uris",
         ),
-        client_secret=env.get(SECRET_ENV["client_secret"], ""),
-        jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
+        client_secret=_secret_from_env(env, "client_secret"),
+        jwt_signing_key=_secret_from_env(env, "jwt_signing_key"),
     )
-    audit = AuditConfig(
-        path=_path(au.get("path", "/var/log/operator-mcp/audit.jsonl"), "audit.path")
-    )
+    audit = AuditConfig(path=_path(au.get("path", str(LEGACY_AUDIT_PATH)), "audit.path"))
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
         workspace_enabled=_bool(t.get("workspace_enabled", False), "tools.workspace_enabled"),
@@ -204,7 +219,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             t.get("breakglass_max_ttl_seconds", 900), "tools.breakglass_max_ttl_seconds"
         ),
         scratch_dir=_path(
-            t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
+            t.get("scratch_dir", str(LEGACY_STATE_DIR / "scratch")), "tools.scratch_dir"
         ),
         timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
         max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),

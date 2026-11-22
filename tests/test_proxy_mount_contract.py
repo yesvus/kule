@@ -14,9 +14,9 @@ from fastmcp.server import create_proxy
 from fastmcp.server.transforms import ToolTransform
 from fastmcp.server.transforms.tool_transform import ToolTransformConfig
 
-from operator_mcp.audit import AuditLog, verify
-from operator_mcp.authz import Policy
-from operator_mcp.middleware import OperatorMiddleware
+from kule.audit import AuditLog, verify
+from kule.authz import Policy
+from kule.middleware import OperatorMiddleware
 
 
 async def test_proxy_mount_only_exposes_explicit_read_allowlist(tmp_path):
