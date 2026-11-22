@@ -2,6 +2,10 @@ name: Maintenance or RFC
 description: Track documentation, maintenance work, or a design discussion.
 labels: ["maintenance", "needs-triage"]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not include credentials, tokens, private host details, or vulnerability reproductions. Report security vulnerabilities privately through https://github.com/yesvus/kule/security/advisories/new.
   - type: dropdown
     id: area
     attributes:
@@ -35,6 +39,24 @@ body:
     attributes:
       label: Completion criteria
       description: Define evidence needed before closing this issue.
+    validations:
+      required: true
+  - type: dropdown
+    id: host_effects
+    attributes:
+      label: Expected host-side effect
+      options:
+        - Read-only observation
+        - Changes host state
+        - Both
+        - Not applicable or unknown
+    validations:
+      required: true
+  - type: input
+    id: role
+    attributes:
+      label: Required caller role
+      placeholder: "operator, developer, not applicable, or unknown"
     validations:
       required: true
   - type: dropdown

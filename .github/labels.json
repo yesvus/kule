@@ -1,5 +1,15 @@
 [
   {
+    "name": "bug",
+    "color": "D73A4A",
+    "description": "Something is not working"
+  },
+  {
+    "name": "enhancement",
+    "color": "A2EEEF",
+    "description": "New feature or improvement"
+  },
+  {
     "name": "maintenance",
     "color": "C9B4ED",
     "description": "Repository upkeep, documentation infrastructure, or design housekeeping"
@@ -12,7 +22,7 @@
   {
     "name": "security-review",
     "color": "B42318",
-    "description": "Requires a dedicated auth, authorization, or privilege security review"
+    "description": "Review identity, host privileges, execution, enrollment, credentials, or audit controls"
   },
   {
     "name": "area:auth",
