@@ -18,8 +18,8 @@ DEFAULT_ALLOWED_CLIENT_REDIRECTS = [
 ]
 
 SECRET_ENV = {
-    "client_secret": "OPERATOR_MCP_OIDC_CLIENT_SECRET",
-    "jwt_signing_key": "OPERATOR_MCP_JWT_SIGNING_KEY",
+    "client_secret": "KULE_OIDC_CLIENT_SECRET",
+    "jwt_signing_key": "KULE_JWT_SIGNING_KEY",
 }
 
 
@@ -59,7 +59,7 @@ class ServerConfig:
     allow_pod_bind: bool = False
     port: int = 8795
     public_url: str = ""
-    state_dir: Path = Path("/var/lib/operator-mcp")
+    state_dir: Path = Path("/var/lib/kule")
 
 
 @dataclass(frozen=True)
@@ -81,13 +81,13 @@ class AuthConfig:
 
 @dataclass(frozen=True)
 class AuditConfig:
-    path: Path = Path("/var/log/operator-mcp/audit.jsonl")
+    path: Path = Path("/var/log/kule/audit.jsonl")
 
 
 @dataclass(frozen=True)
 class ToolsConfig:
     exec_enabled: bool = False
-    scratch_dir: Path = Path("/var/lib/operator-mcp/scratch")
+    scratch_dir: Path = Path("/var/lib/kule/scratch")
     timeout_seconds: float = 30.0
     max_output_bytes: int = 64 * 1024
     workspace_enabled: bool = False
@@ -171,7 +171,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         allow_pod_bind=_bool(s.get("allow_pod_bind", False), "server.allow_pod_bind"),
         port=_int(s.get("port", 8795), "server.port"),
         public_url=_str(s.get("public_url", ""), "server.public_url").rstrip("/"),
-        state_dir=_path(s.get("state_dir", "/var/lib/operator-mcp"), "server.state_dir"),
+        state_dir=_path(s.get("state_dir", "/var/lib/kule"), "server.state_dir"),
     )
     auth = AuthConfig(
         oidc_config_url=_str(a.get("oidc_config_url", ""), "auth.oidc_config_url"),
@@ -190,7 +190,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
         jwt_signing_key=env.get(SECRET_ENV["jwt_signing_key"], ""),
     )
     audit = AuditConfig(
-        path=_path(au.get("path", "/var/log/operator-mcp/audit.jsonl"), "audit.path")
+        path=_path(au.get("path", "/var/log/kule/audit.jsonl"), "audit.path")
     )
     tools = ToolsConfig(
         exec_enabled=_bool(t.get("exec_enabled", False), "tools.exec_enabled"),
@@ -204,7 +204,7 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             t.get("breakglass_max_ttl_seconds", 900), "tools.breakglass_max_ttl_seconds"
         ),
         scratch_dir=_path(
-            t.get("scratch_dir", "/var/lib/operator-mcp/scratch"), "tools.scratch_dir"
+            t.get("scratch_dir", "/var/lib/kule/scratch"), "tools.scratch_dir"
         ),
         timeout_seconds=_float(t.get("timeout_seconds", 30.0), "tools.timeout_seconds"),
         max_output_bytes=_int(t.get("max_output_bytes", 64 * 1024), "tools.max_output_bytes"),
