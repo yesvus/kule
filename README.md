@@ -35,16 +35,16 @@ Kule gives MCP-compatible assistants a secure way to inspect and operate approve
 git clone https://github.com/yesvus/kule.git
 cd kule
 python -m pip install .
-cp examples/config.example.toml config.toml
+kule init --config config.toml
 ```
 
-Set the public URL, OIDC discovery URL, and OAuth client ID in `config.toml`. See [Configuration](docs/CONFIGURATION.md) for settings and execution-policy requirements. Supply credentials via the environment or your secret manager:
+The initializer prompts for the public HTTPS origin, OIDC discovery URL, and registered client ID; it writes a private configuration with host execution disabled. For scripted setup, pass `--public-url`, `--oidc-config-url`, and `--client-id` instead. See the [first-run guide](docs/ONBOARDING.md) and [configuration reference](docs/CONFIGURATION.md). Supply credentials via your environment or secret manager:
 
 ```bash
 export KULE_OIDC_CLIENT_SECRET="your-oidc-client-secret"
 export KULE_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
 
-kule check-config --config config.toml
+kule doctor --config config.toml
 kule serve --config config.toml
 ```
 
