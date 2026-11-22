@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "kule"
-version = "0.1.0.dev0"
+version = "0.1.0"
 description = "Small self-hosted MCP server for authorized host management, with OIDC login, group-based authorization and an audit log."
 readme = "README.md"
 license = "Apache-2.0"
