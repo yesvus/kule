@@ -10,14 +10,12 @@ Kule is an open-source, self-hosted **host management MCP** project. The target 
 
 The **current implementation is transitional**: `src/operator_mcp/` still contains the former single-runtime FastMCP service and legacy Kubernetes, Argo CD, OpenHands and workspace adapters. The `hub/`, `agent/`, and `protocol/` directories currently document package ownership; they are **not yet operational packages**. Do not treat the new multi-host agent topology as deployed or tested.
 
-The planned agent reuses the open-source, Apache-2.0 [SentinelX host agent](https://github.com/pensados/sentinelx-cloud-core) and [wire protocol](https://github.com/pensados/sentinelx-cloud-protocol). SentinelX's hosted hub is closed source and will **not** be used.
-
 ## Security requirements
 
 - Authenticated MCP endpoint with OAuth/OIDC; authorization at discovery **and** call time.
 - Explicitly enrolled host identities; per-host and per-operation policy.
 - Agent-enforced command, file and service allowlists. Host execution is high authority, **not** a sandbox.
-- Bounded timeouts/output, redacted audit, emergency disable and independent owner console/SSH recovery.
+- Bounded timeouts/output, audit logging with best-effort redaction (not a security boundary), emergency disable and independent owner console/SSH recovery.
 - Never automatically expose all hosts, infer host authority from LLM identity, or use arbitrary client-provided target addresses.
 
 ## Running the existing legacy service
@@ -30,7 +28,7 @@ operator-mcp check-config --config /etc/operator-mcp/config.toml
 operator-mcp serve --config /etc/operator-mcp/config.toml
 ```
 
-Provide `OPERATOR_MCP_OIDC_CLIENT_SECRET` and `OPERATOR_MCP_JWT_SIGNING_KEY` through a secret manager or the process environment, never Git. Bind locally by default, terminate TLS at a trusted proxy, and leave `tools.exec_enabled = false` without explicit authority review.
+Configure `server.public_url`, OIDC issuer/client settings, allowed OAuth redirect URIs, operator groups, audit/state paths and tool policy in TOML. Provide `OPERATOR_MCP_OIDC_CLIENT_SECRET` and `OPERATOR_MCP_JWT_SIGNING_KEY` through a secret manager or the process environment, never Git. Bind locally by default, terminate TLS at a trusted proxy, and leave `tools.exec_enabled = false` without explicit authority review.
 
 ## Development
 
