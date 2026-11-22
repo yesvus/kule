@@ -259,9 +259,7 @@ def test_doctor_checks_host_executor_prerequisites(tmp_path, monkeypatch, capsys
 def test_doctor_rejects_invalid_endpoint_port(tmp_path, monkeypatch, capsys):
     path = initialize(tmp_path)
     path.write_text(
-        path.read_text().replace(
-            "https://mcp.example.com", "https://mcp.example.com:99999"
-        )
+        path.read_text().replace("https://mcp.example.com", "https://mcp.example.com:99999")
     )
     monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "secret")
     monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)

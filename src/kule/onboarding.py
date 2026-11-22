@@ -200,7 +200,7 @@ def doctor(path: Path) -> int:
             and "?" not in cfg.server.public_url
             and "#" not in cfg.server.public_url
             and all(
-                not ch.isspace() and 32 <= ord(ch) < 127
+                not ch.isspace() and ord(ch) >= 32 and ord(ch) != 127
                 for ch in cfg.server.public_url
             )
         )
