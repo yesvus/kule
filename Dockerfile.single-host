@@ -33,6 +33,18 @@ RUN python -m pip check \
     && rm -f /tmp/kule-config-smoke.toml
 WORKDIR /var/lib/kule
 USER 10001:10001
+# Verify the non-root runtime can create and inspect private persistent state
+# on both target architectures. No real credentials or state enter the image.
+RUN export KULE_OIDC_CLIENT_SECRET=ci-only-placeholder \
+    KULE_JWT_SIGNING_KEY="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')" \
+    && kule init --config /var/lib/kule/config.toml \
+       --public-url https://mcp.example.com \
+       --oidc-config-url https://id.example.com/.well-known/openid-configuration \
+       --client-id container-smoke \
+    && kule doctor --config /var/lib/kule/config.toml \
+    && rm -f /var/lib/kule/config.toml \
+    && rm -rf /var/lib/kule/.local \
+    && test ! -f /var/lib/kule/config.toml
 EXPOSE 8795
 ENTRYPOINT ["kule"]
 CMD ["serve", "--config", "/var/lib/kule/config.toml"]
