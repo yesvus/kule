@@ -59,6 +59,12 @@ ruff format --check .
 pytest -q
 ```
 
+## Single-host container
+
+The public `ghcr.io/yesvus/kule:sha-<commit>` image is a minimal single-host runtime, built for Linux AMD64 and ARM64. It includes the installed Kule package and OpenSSH client, **not** Kubernetes, Argo CD, workspace/developer or OpenHands runtime integrations. Those settings are rejected in this image; the original `Dockerfile` is reserved for explicit legacy/integrator builds. Pin an immutable OCI index digest for deployment rather than relying on a mutable tag.
+
+The image runs as UID/GID `10001`. Persist `/var/lib/kule`, including `config.toml` and private OAuth/audit state. For an external TLS-terminating reverse proxy, set `server.host = "0.0.0.0"` and `server.allow_pod_bind = true` and expose port 8795 only to the trusted proxy. Keep the OIDC secret and durable JWT signing key outside the image. See [container onboarding](docs/ONBOARDING.md#container-distribution) and the [release procedure](docs/RELEASING.md).
+
 ## Architecture
 
 Kule is being developed as three components in one repository:
