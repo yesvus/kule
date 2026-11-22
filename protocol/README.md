@@ -1,9 +1,9 @@
-# Kule Agent–Hub Protocol
+# Kule Protocol
 
-The planned versioned wire contract between Kule Hub and Kule Agent.
+The versioned communication contract shared by the Hub and host agents.
 
-**Current status:** architecture skeleton only. Import and pin the open-source upstream schemas and typed bindings with proper attribution; maintain compatible extensions behind reviewed protocol versions.
+The protocol will define authenticated enrollment and handshake, typed request and reply messages, request correlation, timeouts, compatibility negotiation, reconnection and revocation behavior.
 
-Core contract: authenticated `hello` with host identity and negotiated version, typed `request` / `reply` messages correlated by ID, bounded outputs, reconnect/replay handling, revocation, expiry and protocol compatibility tests. Hub signs and validates Kule enrollment identities; no third-party hosted Hub is part of the deployment.
+The dedicated protocol package is in development.
 
-See [architecture](../docs/architecture/host-control-monorepo.md).
+See the [architecture](../docs/architecture/host-control-monorepo.md).
