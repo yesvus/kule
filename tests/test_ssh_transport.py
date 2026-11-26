@@ -254,9 +254,7 @@ sys.exit(0)
 """,
     )
     transport = SshHostTransport(ssh_bin=fake_ssh)
-    res = await transport.read_command(
-        host, ["uptime"], timeout_seconds=5, max_output_bytes=64
-    )
+    res = await transport.read_command(host, ["uptime"], timeout_seconds=5, max_output_bytes=64)
     assert res.returncode == 0
     assert res.truncated is True
     assert len(res.output) == 64
@@ -291,9 +289,7 @@ class FakeMultiHostTransport:
         if host.host_id in self.fail_hosts:
             raise self.fail_hosts[host.host_id]
         os_info = (
-            "Darwin 24.1.0 arm64"
-            if host.platform is HostPlatform.MACOS
-            else "Linux 6.8.0 aarch64"
+            "Darwin 24.1.0 arm64" if host.platform is HostPlatform.MACOS else "Linux 6.8.0 aarch64"
         )
         return HostStatus(
             host_id=host.host_id,
@@ -443,9 +439,7 @@ async def test_two_host_status_routing_and_denials(make_cfg, claims, tmp_path: P
         and r.get("request_id")
         for r in records
     )
-    assert any(
-        r["event"] == "denied" and r.get("host_id") == "secret-box" for r in records
-    )
+    assert any(r["event"] == "denied" and r.get("host_id") == "secret-box" for r in records)
     ok, count = verify_audit(cfg.audit.path)
     assert ok and count == len(records)
 
