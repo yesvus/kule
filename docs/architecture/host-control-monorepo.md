@@ -24,7 +24,7 @@ MCP client ──HTTPS/OAuth──> Kule Hub ──HostTransport──┤
 
 ### Hub (`hub/`, currently `src/kule/`)
 
-The Hub is Kule's MCP-facing service over HTTPS. It owns OAuth/OIDC authentication, `HostRegistry`, `caller × host × operation` authorization, the emergency kill switch, `HostTransport` routing, and target-aware hash-chained audit logging. In `v0.4.0` (if needed), the Hub may also host a WebSocket listener for outbound agents and an operator CLI (`kule host`, `kule grant`, `kule audit`).
+The Hub is Kule's MCP-facing service over HTTPS. It owns OAuth/OIDC authentication, `HostRegistry`, `caller × host × operation` authorization, the emergency kill switch, `HostTransport` routing, and target-aware hash-chained audit logging. In `v0.4.0`, the Hub adds an operator CLI (`kule host`, `kule grant`, `kule audit`) and, if needed, a WebSocket listener for outbound agents.
 
 ### Explicit-inventory SSH transport (`v0.2.0`)
 
@@ -36,7 +36,7 @@ If future requirements demand agent-local policy enforcement or reaching hosts b
 
 ### Protocol (`protocol/`, conditional in `v0.4.0`)
 
-If `agent/` is introduced, `protocol/` will define a minimal Kule-native versioned wire contract: `Authorization: Bearer` header or post-connect authenticated handshake frames (never URL query-parameter tokens), revocable Hub-issued enrollment identities, typed request/response messages, `request_id` correlation, capability negotiation, bounded frame sizes and timeouts, reconnection, and immediate revocation. External identity issuers will not be accepted for agent enrollment.
+If `agent/` is introduced, `protocol/` will define a minimal Kule-native versioned wire contract: `Authorization: Bearer` header or post-connect authenticated handshake frames (never URL query-parameter tokens), revocable Hub-issued enrollment identities, typed request/response messages, `request_id` correlation, protocol version and compatibility negotiation, capability negotiation, bounded frame sizes and timeouts, reconnection, and immediate revocation. External identity issuers will not be accepted for agent enrollment.
 
 ## Staged roadmap
 
@@ -52,9 +52,9 @@ If `agent/` is introduced, `protocol/` will define a minimal Kule-native version
 
 - **Fail-closed authorization**: Unknown `host_id`, missing group membership, wrong-host routing, disabled per-host capabilities, host-key mismatch, expired/revoked grants, and an active kill switch all deny execution.
 - **Explicit host inventory**: Clients address hosts only by approved `host_id`s, never by arbitrary hostnames, IP addresses, or wildcards. SSH forwarding and agent forwarding are disabled.
-- **Opt-in execution**: Remote shell execution (`host_exec`) is disabled by default both globally and per host, and enabling it on one host never grants access to another.
+- **Opt-in execution**: Remote shell execution (`host_exec`) is disabled by default both globally (via the global `[tools] exec_enabled` switch) and per host (via the per-host `exec_enabled` flag). Both must be explicitly enabled for execution to be permitted, and enabling execution on one host never grants access to another.
 - **Transport and auth hygiene**: Outbound WSS agents (when implemented in `v0.4.0`) must authenticate via `Authorization: Bearer` headers or post-connect authenticated handshake frames — never URL query parameters that can leak into proxy logs. Revocation must block new calls immediately; in-flight cancellation semantics must be verified before claiming remote process termination.
-- **Auditing and redaction**: Audit events include `host_id`, `transport`, `request_id`, and optional `grant_id`, and omit credentials and secrets by default. Redaction is best-effort rather than a secret-isolation mechanism; protect audit logs from unauthorized modification.
+- **Auditing and redaction**: Audit events include `host_id`, `transport`, `request_id`, and optional `grant_id`. Audit records omit credentials and command bodies by default. Redaction is best-effort rather than a secret-isolation mechanism; protect audit logs from unauthorized modification.
 - **Independent recovery**: Owner SSH/console recovery must remain independent of Kule Hub, OIDC, or gateway availability. Kule must never become the sole recovery path to a host.
 
 ## Scope boundaries and rejected dependencies
