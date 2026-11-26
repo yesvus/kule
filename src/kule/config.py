@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .hosts import (
+    HostConfig,
+    HostPlatform,
+    HostPolicy,
+    HostRegistry,
+    HostTransportType,
+    SshTargetConfig,
+)
+
 # ChatGPT connector redirect URIs (OpenAI Apps SDK auth docs). Only these may
 # be registered through dynamic client registration unless overridden.
 DEFAULT_ALLOWED_CLIENT_REDIRECTS = [
@@ -115,11 +124,16 @@ class Config:
     auth: AuthConfig
     audit: AuditConfig
     tools: ToolsConfig
+    hosts: tuple[HostConfig, ...] = ()
 
     @property
     def kill_switch_path(self) -> Path:
         """If this file exists, every tool call is refused."""
         return self.server.state_dir / "DISABLED"
+
+    def host_registry(self) -> HostRegistry:
+        """Return an immutable HostRegistry built from configured hosts."""
+        return HostRegistry(self.hosts)
 
 
 def _section(data: dict, name: str) -> dict:
@@ -204,6 +218,92 @@ def validate_single_host_integrations(cfg: Config, env: dict[str, str] | None = 
     return True
 
 
+_HOST_KEYS = frozenset({"host_id", "transport", "platform", "description", "ssh", "policy"})
+_SSH_KEYS = frozenset({"host", "user", "port", "key_path", "known_hosts_path"})
+_POLICY_KEYS = frozenset({"read_groups", "exec_groups", "exec_enabled"})
+
+
+def _reject_unknown_keys(table: dict, allowed: frozenset[str], name: str) -> None:
+    unknown = sorted(set(table) - allowed)
+    if unknown:
+        raise ConfigError(f"{name} has unknown setting(s): {', '.join(unknown)}")
+
+
+def _parse_hosts(data: dict) -> tuple[HostConfig, ...]:
+    raw_hosts = data.get("hosts")
+    if raw_hosts is None:
+        return ()
+    if not isinstance(raw_hosts, list):
+        raise ConfigError("[[hosts]] must be an array of host tables")
+    parsed: list[HostConfig] = []
+    for idx, entry in enumerate(raw_hosts):
+        prefix = f"hosts[{idx}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{prefix} must be a table")
+        _reject_unknown_keys(entry, _HOST_KEYS, prefix)
+        host_id = _str(entry.get("host_id"), f"{prefix}.host_id")
+        transport_raw = _str(entry.get("transport", "ssh"), f"{prefix}.transport")
+        try:
+            transport = HostTransportType(transport_raw)
+        except ValueError:
+            raise ConfigError(f"{prefix}.transport must be 'ssh'") from None
+        platform_raw = _str(entry.get("platform"), f"{prefix}.platform")
+        try:
+            platform = HostPlatform(platform_raw)
+        except ValueError:
+            raise ConfigError(f"{prefix}.platform must be 'linux' or 'macos'") from None
+        description = _str(entry.get("description", ""), f"{prefix}.description")
+
+        ssh_raw = entry.get("ssh")
+        if not isinstance(ssh_raw, dict):
+            raise ConfigError(f"{prefix}.ssh must be a table")
+        _reject_unknown_keys(ssh_raw, _SSH_KEYS, f"{prefix}.ssh")
+
+        policy_raw = entry.get("policy", {})
+        if not isinstance(policy_raw, dict):
+            raise ConfigError(f"{prefix}.policy must be a table")
+        _reject_unknown_keys(policy_raw, _POLICY_KEYS, f"{prefix}.policy")
+
+        try:
+            ssh = SshTargetConfig(
+                host=_str(ssh_raw.get("host"), f"{prefix}.ssh.host"),
+                user=_str(ssh_raw.get("user"), f"{prefix}.ssh.user"),
+                key_path=_path(ssh_raw.get("key_path"), f"{prefix}.ssh.key_path"),
+                known_hosts_path=_path(
+                    ssh_raw.get("known_hosts_path"), f"{prefix}.ssh.known_hosts_path"
+                ),
+                port=_int(ssh_raw.get("port", 22), f"{prefix}.ssh.port"),
+            )
+            policy = HostPolicy(
+                read_groups=frozenset(
+                    _string_list(policy_raw.get("read_groups", []), f"{prefix}.policy.read_groups")
+                ),
+                exec_groups=frozenset(
+                    _string_list(policy_raw.get("exec_groups", []), f"{prefix}.policy.exec_groups")
+                ),
+                exec_enabled=_bool(
+                    policy_raw.get("exec_enabled", False), f"{prefix}.policy.exec_enabled"
+                ),
+            )
+            parsed.append(
+                HostConfig(
+                    host_id=host_id,
+                    transport=transport,
+                    platform=platform,
+                    ssh=ssh,
+                    policy=policy,
+                    description=description,
+                )
+            )
+        except ValueError as exc:
+            raise ConfigError(f"{prefix}: {exc}") from None
+    try:
+        HostRegistry(parsed)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    return tuple(parsed)
+
+
 def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
     env = os.environ if env is None else env
     with path.open("rb") as fh:
@@ -267,13 +367,24 @@ def load_config(path: Path, env: dict[str, str] | None = None) -> Config:
             raise ConfigError("workspace requires pinned and approved Pod names")
         if env["KULE_WORKSPACE_POD"] != env["KULE_WORKSPACE_APPROVED_POD"]:
             raise ConfigError("KULE_WORKSPACE_POD differs from approved Pod")
-    cfg = Config(server=server, auth=auth, audit=audit, tools=tools)
+    hosts = _parse_hosts(data)
+    cfg = Config(server=server, auth=auth, audit=audit, tools=tools, hosts=hosts)
     validate(cfg)
     validate_single_host_integrations(cfg, env)
     return cfg
 
 
 def validate(cfg: Config) -> None:
+    try:
+        HostRegistry(cfg.hosts)
+    except ValueError as exc:
+        raise ConfigError(str(exc)) from None
+    for host in cfg.hosts:
+        if host.policy.exec_enabled and not host.policy.exec_groups:
+            raise ConfigError(
+                f"host '{host.host_id}': policy.exec_enabled = true "
+                "requires non-empty policy.exec_groups"
+            )
     if cfg.tools.developer_enabled and not cfg.tools.workspace_enabled:
         raise ConfigError("developer_enabled requires workspace_enabled")
     if cfg.tools.developer_isolation_verified and not cfg.tools.developer_enabled:
