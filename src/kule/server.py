@@ -17,12 +17,14 @@ from .middleware import ClaimsGetter, OperatorMiddleware, claims_from_request
 from .tools import (
     basic,
     host_exec,
+    hosts,
     kubernetes,
     openhands,
     upstream_argocd,
     upstream_kubernetes,
     workspace,
 )
+from .transport import HostTransport
 
 INSTRUCTIONS = (
     "Operator tools for a self-hosted host. Every call is authorized against the "
@@ -75,6 +77,7 @@ def build_server(
     auth: AuthProvider | None = None,
     claims_getter: ClaimsGetter = claims_from_request,
     integrations: IntegrationRegistry | None = None,
+    host_transport: HostTransport | None = None,
 ) -> FastMCP:
     single_host = validate_single_host_integrations(cfg)
 
@@ -92,6 +95,7 @@ def build_server(
         breakglass_enabled=cfg.tools.breakglass_enabled,
         breakglass_max_ttl_seconds=cfg.tools.breakglass_max_ttl_seconds,
     )
+    host_registry = cfg.host_registry() if cfg.hosts else None
     audit = AuditLog(cfg.audit.path)
     middleware = OperatorMiddleware(
         policy=policy,
@@ -101,7 +105,7 @@ def build_server(
         max_output_bytes=cfg.tools.max_output_bytes,
         claims_getter=claims_getter,
         integrations=integrations if integrations is not None else IntegrationRegistry(),
-        hosts=cfg.host_registry() if cfg.hosts else None,
+        hosts=host_registry,
     )
     mcp = FastMCP(
         name="kule",
@@ -110,7 +114,10 @@ def build_server(
         middleware=[middleware],
     )
     basic.register(mcp, cfg, claims_getter, policy)
-    host_exec.register(mcp, cfg)
+    if host_registry is not None:
+        hosts.register(mcp, cfg, claims_getter, policy, host_registry, transport=host_transport)
+    else:
+        host_exec.register(mcp, cfg)
     if not single_host:
         workspace.register(mcp, cfg)
         kubernetes.register(mcp, timeout_seconds=cfg.tools.timeout_seconds)
