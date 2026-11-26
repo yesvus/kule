@@ -257,7 +257,7 @@ def _grant_id(raw: Any) -> str | None:
     if not isinstance(raw, str):
         return None
     stripped = raw.strip()
-    if not stripped or len(stripped) > 128 or any(ch in "\x00\r\n\t" for ch in stripped):
+    if not stripped or len(stripped) > 128 or not stripped.isprintable():
         return None
     return stripped
 

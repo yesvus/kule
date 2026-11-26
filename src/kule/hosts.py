@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 # Stable lowercase host identifier; rejects wildcards, slashes, whitespace, and options.
@@ -18,7 +19,11 @@ _HOSTNAME_RE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$"
 )
 _USERNAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9._-]{0,63}$")
-_FORBIDDEN_CHARS = frozenset("*?[]\x00\r\n\t")
+_FORBIDDEN_CHARS = frozenset("*?[]")
+
+
+def _has_control_char(value: str) -> bool:
+    return any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in value)
 
 
 class HostPlatform(StrEnum):
@@ -41,10 +46,12 @@ def _validate_host_id(host_id: object) -> str:
 def _validate_host_address(host: object) -> str:
     if not isinstance(host, str) or not host or host != host.strip():
         raise ValueError("ssh.host must be a non-empty hostname or IP address")
-    if any(ch in _FORBIDDEN_CHARS for ch in host) or len(host) > 253:
+    if any(ch in _FORBIDDEN_CHARS for ch in host) or _has_control_char(host) or len(host) > 253:
         raise ValueError(
             "ssh.host must not contain wildcards, control characters, or exceed 253 chars"
         )
+    if "%" in host:
+        raise ValueError("ssh.host must not contain an IPv6 zone scope")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
@@ -53,7 +60,11 @@ def _validate_host_address(host: object) -> str:
                 "ssh.host must be an explicit hostname or IP (no wildcards, ports, or user@host)"
             ) from None
         return host
-    if ip.is_unspecified:
+    if ip.is_unspecified or (
+        isinstance(ip, ipaddress.IPv6Address)
+        and ip.ipv4_mapped is not None
+        and ip.ipv4_mapped.is_unspecified
+    ):
         raise ValueError("ssh.host must not be an unspecified wildcard address (0.0.0.0 or ::)")
     return host
 
@@ -68,7 +79,7 @@ def _validate_path(path: object, name: str) -> Path:
     if not isinstance(path, Path):
         raise ValueError(f"{name} must be a Path")
     raw = str(path)
-    if not raw.strip() or any(ch in _FORBIDDEN_CHARS for ch in raw):
+    if not raw.strip() or any(ch in _FORBIDDEN_CHARS for ch in raw) or _has_control_char(raw):
         raise ValueError(f"{name} must be a non-empty path without wildcards or control characters")
     return path
 
@@ -82,6 +93,7 @@ def _validate_groups(groups: object, name: str) -> frozenset[str]:
             or not group
             or group != group.strip()
             or any(ch in _FORBIDDEN_CHARS for ch in group)
+            or _has_control_char(group)
         ):
             raise ValueError(
                 f"{name} entries must be non-empty group names without wildcards or control chars"
@@ -144,7 +156,7 @@ class HostConfig:
             raise ValueError("policy must be a HostPolicy")
         if not isinstance(self.description, str) or len(self.description) > 256:
             raise ValueError("description must be a string of at most 256 characters")
-        if any(ch in "\x00\r\n" for ch in self.description):
+        if _has_control_char(self.description):
             raise ValueError("description must not contain control characters")
 
     def public_metadata(self) -> dict[str, Any]:
@@ -169,7 +181,7 @@ class HostRegistry:
             if host.host_id in entries:
                 raise ValueError(f"duplicate host_id: {host.host_id!r}")
             entries[host.host_id] = host
-        self._hosts = entries
+        self._hosts: Mapping[str, HostConfig] = MappingProxyType(entries)
 
     def get(self, host_id: str) -> HostConfig | None:
         if not isinstance(host_id, str):

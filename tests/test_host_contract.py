@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 from fastmcp import Client
 from fastmcp.exceptions import ToolError
 
 from kule.audit import AuditLog, verify
-from kule.authz import EXEC, HOST_SCOPED, READ, HostOperation, Policy
+from kule.authz import EXEC, HOST_SCOPED, OPERATE, READ, WORKSPACE, HostOperation, Policy
 from kule.config import ConfigError, load_config
 from kule.hosts import (
     HostConfig,
@@ -20,6 +21,13 @@ from kule.hosts import (
     HostRegistry,
     HostTransportType,
     SshTargetConfig,
+)
+from kule.integrations import (
+    Capability,
+    Integration,
+    IntegrationRegistry,
+    capability_tag,
+    integration_tag,
 )
 from kule.redact import MASK
 from kule.server import build_server
@@ -606,3 +614,190 @@ async def test_middleware_enforces_host_scoped_authz_and_target_audit(make_cfg, 
     assert last["transport"] == "ssh"
     assert last["request_id"]
     assert verify(cfg.audit.path)[0] is True
+
+
+# --- Review finding regression tests ----------------------------------------
+
+
+def test_host_registry_internal_mapping_is_immutable():
+    reg = HostRegistry([_host("alpha")])
+    assert isinstance(reg._hosts, MappingProxyType)
+    with pytest.raises(TypeError):
+        reg._hosts["beta"] = _host("beta")  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "bad_addr",
+    [
+        "fe80::1%eth0",
+        "fe80::1%25",
+        "::ffff:0.0.0.0",
+        "::ffff:0:0",
+    ],
+)
+def test_ssh_target_rejects_scoped_and_ipv4_mapped_unspecified_ipv6(bad_addr):
+    with pytest.raises(ValueError, match="ssh.host"):
+        _host(address=bad_addr)
+
+
+@pytest.mark.parametrize("ctrl", ["\x00", "\x07", "\t", "\n", "\r", "\x1b", "\x7f"])
+def test_hosts_reject_all_ascii_control_chars(ctrl):
+    with pytest.raises(ValueError, match="description"):
+        _host(description=f"node{ctrl}1")
+    with pytest.raises(ValueError, match="key_path"):
+        SshTargetConfig(
+            host="192.0.2.10",
+            user="operator",
+            key_path=Path(f"/keys/id{ctrl}1"),
+            known_hosts_path=Path("/keys/known_hosts"),
+        )
+    with pytest.raises(ValueError, match="known_hosts_path"):
+        SshTargetConfig(
+            host="192.0.2.10",
+            user="operator",
+            key_path=Path("/keys/id"),
+            known_hosts_path=Path(f"/keys/kh{ctrl}1"),
+        )
+    with pytest.raises(ValueError, match="read_groups"):
+        HostPolicy(read_groups=frozenset({f"ops{ctrl}1"}))
+    with pytest.raises(ValueError, match="exec_groups"):
+        HostPolicy(exec_groups=frozenset({f"exec{ctrl}1"}))
+
+
+def test_config_rejects_exec_enabled_with_empty_exec_groups(tmp_path: Path):
+    toml = (
+        BASE_TOML
+        + """
+[[hosts]]
+host_id = "a"
+platform = "linux"
+[hosts.ssh]
+host = "192.0.2.10"
+user = "op"
+key_path = "/k"
+known_hosts_path = "/kh"
+[hosts.policy]
+read_groups = ["ops"]
+exec_enabled = true
+exec_groups = []
+"""
+    )
+    cfg_path = tmp_path / "kule.toml"
+    cfg_path.write_text(toml)
+    with pytest.raises(ConfigError, match="exec_groups"):
+        load_config(cfg_path, ENV)
+
+
+@pytest.mark.parametrize(
+    "bad_grant",
+    ["", "   ", "g\x1b[31m", "g\x7fid", "g\x07id", "g\nid", "x" * 129],
+)
+def test_caller_from_claims_rejects_non_printable_grant_id(bad_grant):
+    policy = Policy(required_group="ops", exec_group="ops-exec", exec_enabled=True)
+    caller = policy.caller_from_claims(
+        {"sub": "u1", "groups": ["ops"], "breakglass_grant_id": bad_grant}
+    )
+    assert caller is not None
+    assert caller.grant_id is None
+
+
+async def test_middleware_ignores_caller_supplied_grant_id_and_digests_custom_host_exec(
+    make_cfg, claims
+):
+    host_a = _host(
+        "host-a",
+        read_groups=frozenset({"read-a"}),
+        exec_groups=frozenset({"exec-a"}),
+        exec_enabled=True,
+    )
+    base_cfg = make_cfg(exec_enabled=True)
+    cfg = type(base_cfg)(
+        server=base_cfg.server,
+        auth=base_cfg.auth,
+        audit=base_cfg.audit,
+        tools=base_cfg.tools,
+        hosts=(host_a,),
+    )
+    mcp = build_server(cfg, claims_getter=claims)
+
+    @mcp.tool(tags={EXEC, HOST_SCOPED})
+    async def custom_host_run(host_id: str, script: str, grant_id: str = "") -> dict:
+        return {"host_id": host_id, "ok": True}
+
+    claims.value = {
+        "sub": "u1",
+        "preferred_username": "alice",
+        "groups": ["ops", "ops-exec", "read-a", "exec-a"],
+    }
+    async with Client(mcp) as client:
+        res = await client.call_tool(
+            "custom_host_run",
+            {"host_id": "host-a", "script": "echo top-secret-script", "grant_id": "spoofed-99"},
+        )
+        assert res.data == {"host_id": "host-a", "ok": True}
+
+    raw_audit = cfg.audit.path.read_text()
+    assert "top-secret-script" not in raw_audit
+    events = [json.loads(line) for line in raw_audit.splitlines()]
+    assert all("grant_id" not in e for e in events)
+    call_event = next(e for e in events if e["event"] == "call")
+    assert call_event["args"]["script_valid"] is True
+    assert isinstance(call_event["args"]["script_sha256"], str)
+    assert call_event["args"]["host_id"] == "host-a"
+
+
+async def test_middleware_denies_unsupported_tiers_and_integration_tags_on_host_scoped(
+    make_cfg, claims
+):
+    host_a = _host(
+        "host-a",
+        read_groups=frozenset({"read-a"}),
+        exec_groups=frozenset({"exec-a"}),
+        exec_enabled=True,
+    )
+    base_cfg = make_cfg(exec_enabled=True)
+    cfg = type(base_cfg)(
+        server=base_cfg.server,
+        auth=base_cfg.auth,
+        audit=base_cfg.audit,
+        tools=base_cfg.tools,
+        hosts=(host_a,),
+    )
+    integrations = IntegrationRegistry()
+    integrations.register(
+        Integration(
+            name="k8s",
+            enabled=True,
+            backend_identity="cluster-1",
+            capabilities=frozenset({Capability.K8S_READ}),
+            targets={"host_id": frozenset({"host-a"})},
+        )
+    )
+    mcp = build_server(cfg, claims_getter=claims, integrations=integrations)
+
+    @mcp.tool(tags={OPERATE, HOST_SCOPED})
+    async def host_operate(host_id: str) -> dict:
+        return {"ok": True}
+
+    @mcp.tool(tags={WORKSPACE, HOST_SCOPED})
+    async def host_workspace(host_id: str) -> dict:
+        return {"ok": True}
+
+    @mcp.tool(tags={integration_tag("k8s"), capability_tag(Capability.K8S_READ), HOST_SCOPED})
+    async def host_k8s_hybrid(host_id: str) -> dict:
+        return {"ok": True}
+
+    claims.value = {
+        "sub": "u1",
+        "preferred_username": "alice",
+        "groups": ["ops", "ops-exec", "read-a", "exec-a", "mcp-workspace"],
+    }
+    async with Client(mcp) as client:
+        names = {t.name for t in await client.list_tools()}
+        assert "host_operate" not in names
+        assert "host_workspace" not in names
+        assert "host_k8s_hybrid" not in names
+
+        for tool_name in ("host_operate", "host_workspace", "host_k8s_hybrid"):
+            with pytest.raises(ToolError, match="not authorized"):
+                await client.call_tool(tool_name, {"host_id": "host-a"})

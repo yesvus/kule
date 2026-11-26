@@ -8,7 +8,7 @@ import json
 import os
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,7 @@ from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.versions import VersionSpec
 
 from .audit import AuditLog
-from .authz import EXEC, HOST_SCOPED, Caller, HostOperation, Policy, Role
+from .authz import EXEC, HOST_SCOPED, READ, Caller, HostOperation, Policy, Role
 from .hosts import HostRegistry
 from .integrations import IntegrationRegistry, is_integration_tool
 
@@ -52,6 +52,14 @@ def _requested_version(message: mt.CallToolRequestParams) -> VersionSpec | None:
         fields = {key: raw[key] for key in ("gte", "lt", "eq") if isinstance(raw.get(key), str)}
         if fields:
             return VersionSpec(**fields)
+    return None
+
+
+def _host_operation_for_tier(tier: str | None) -> HostOperation | None:
+    if tier == READ:
+        return HostOperation.READ
+    if tier == EXEC:
+        return HostOperation.EXEC
     return None
 
 
@@ -126,10 +134,6 @@ class OperatorMiddleware(Middleware):
                 host = self.hosts.get(raw_host_id)
                 if host is not None:
                     who["transport"] = host.transport.value
-        if "grant_id" not in who:
-            raw_grant_id = args.get("grant_id")
-            if isinstance(raw_grant_id, str) and raw_grant_id.strip():
-                who["grant_id"] = raw_grant_id.strip()
 
     def _authorize(
         self,
@@ -140,6 +144,8 @@ class OperatorMiddleware(Middleware):
         parameter_names: frozenset[str] | None,
     ) -> tuple[bool, str, str | None]:
         if is_integration_tool(tool.tags):
+            if HOST_SCOPED in tool.tags:
+                return False, "host-scoped integration tools are not supported", "integration"
             # Role/capability/target policy is authoritative for integration
             # tools; legacy tier tags must not widen or bypass it.
             if self.integrations is None:
@@ -151,7 +157,9 @@ class OperatorMiddleware(Middleware):
         ok, reason = self.policy.allows(caller, tool.tags)
         tier = self.policy.tier_of(tool.tags)
         if ok and HOST_SCOPED in tool.tags:
-            op = HostOperation.EXEC if tier == EXEC else HostOperation.READ
+            op = _host_operation_for_tier(tier)
+            if op is None:
+                return False, f"unsupported tier '{tier}' for host-scoped tool", tier
             raw_host_id = args.get("host_id")
             host_ok, host_reason = self.policy.allows_host(
                 caller,
@@ -182,6 +190,8 @@ class OperatorMiddleware(Middleware):
         defaults: dict[str, Tool | None] = {}
         for tool in tools:
             if is_integration_tool(tool.tags):
+                if HOST_SCOPED in tool.tags:
+                    continue
                 # A name-only call dispatches the highest version. Do not
                 # advertise an older version that the same name-only call
                 # cannot reach; explicit version selectors are still allowed
@@ -202,9 +212,8 @@ class OperatorMiddleware(Middleware):
                     visible.append(tool)
             elif self.policy.allows(caller, tool.tags)[0]:
                 if HOST_SCOPED in tool.tags:
-                    tier = self.policy.tier_of(tool.tags)
-                    op = HostOperation.EXEC if tier == EXEC else HostOperation.READ
-                    if self.policy.authorized_hosts(caller, self.hosts, op):
+                    op = _host_operation_for_tier(self.policy.tier_of(tool.tags))
+                    if op is not None and self.policy.authorized_hosts(caller, self.hosts, op):
                         visible.append(tool)
                 else:
                     visible.append(tool)
@@ -246,6 +255,7 @@ class OperatorMiddleware(Middleware):
         self._annotate_target(args, who)
         self._annotate_integration(tool, who)
         parameter_names = _tool_parameter_names(tool)
+        audit_args = _audit_arguments(name, args, tool.tags)
 
         ok, reason, tier = self._authorize(tool, caller, roles, args, parameter_names)
         if not ok:
@@ -341,7 +351,7 @@ def _audit_text_digest(value: Any, max_bytes: int) -> dict[str, Any]:
     return {"valid": True, "bytes": len(encoded), "sha256": hashlib.sha256(encoded).hexdigest()}
 
 
-def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
+def _audit_arguments(tool: str, args: dict[str, Any], tags: Iterable[str] = ()) -> dict[str, Any]:
     """Sanitize Argo origin overrides and hash bounded Tezgah arguments."""
     if tool.startswith("argocd_"):
         sanitized = dict(args)
@@ -349,7 +359,8 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
         if "argocdBaseUrl" in args:
             sanitized["argocd_base_url_override"] = True
         return sanitized
-    if tool == "host_exec":
+    tag_set = frozenset(tags)
+    if tool == "host_exec" or {EXEC, HOST_SCOPED}.issubset(tag_set):
         metadata = _audit_text_digest(args.get("script"), 16384)
         out: dict[str, Any] = {
             "script_bytes": metadata.get("bytes"),

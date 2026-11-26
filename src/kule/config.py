@@ -379,6 +379,12 @@ def validate(cfg: Config) -> None:
         HostRegistry(cfg.hosts)
     except ValueError as exc:
         raise ConfigError(str(exc)) from None
+    for host in cfg.hosts:
+        if host.policy.exec_enabled and not host.policy.exec_groups:
+            raise ConfigError(
+                f"host '{host.host_id}': policy.exec_enabled = true "
+                "requires non-empty policy.exec_groups"
+            )
     if cfg.tools.developer_enabled and not cfg.tools.workspace_enabled:
         raise ConfigError("developer_enabled requires workspace_enabled")
     if cfg.tools.developer_isolation_verified and not cfg.tools.developer_enabled:
