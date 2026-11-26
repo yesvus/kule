@@ -204,7 +204,9 @@ def test_v010_config_without_hosts_stays_backwards_compatible(tmp_path: Path):
 
 
 def test_config_loads_multi_host_inventory_toml(tmp_path: Path):
-    toml = BASE_TOML + """
+    toml = (
+        BASE_TOML
+        + """
 [[hosts]]
 host_id = "linux-box"
 transport = "ssh"
@@ -232,6 +234,7 @@ known_hosts_path = "/var/run/kule/known_hosts"
 [hosts.policy]
 read_groups = ["ops"]
 """
+    )
     cfg_path = tmp_path / "kule.toml"
     cfg_path.write_text(toml)
     cfg = load_config(cfg_path, ENV)
@@ -587,9 +590,7 @@ async def test_middleware_enforces_host_scoped_authz_and_target_audit(make_cfg, 
     assert denied_b["transport"] == "ssh"
 
     denied_unknown = next(
-        e
-        for e in events
-        if e["event"] == "denied" and e.get("host_id") == "no-such-host"
+        e for e in events if e["event"] == "denied" and e.get("host_id") == "no-such-host"
     )
     assert "transport" not in denied_unknown
 
