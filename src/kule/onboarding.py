@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from .config import ConfigError, load_config
+from .hosts import HostTransportType
 
 
 def _required(value: str | None, flag: str, prompt: str) -> str:
@@ -161,7 +162,34 @@ def doctor(path: Path) -> int:
     else:
         print("PASS emergency stop is not engaged")
 
-    if cfg.tools.exec_enabled:
+    if cfg.hosts:
+        for host in cfg.hosts:
+            host_problems = 0
+            if host.transport == HostTransportType.SSH:
+                key = host.ssh.key_path
+                if not key.exists():
+                    print(f"FAIL host {host.host_id}: SSH key file missing")
+                    host_problems += 1
+                elif not key.is_file():
+                    print(f"FAIL host {host.host_id}: SSH key is not a regular file")
+                    host_problems += 1
+                elif stat.S_IMODE(key.stat().st_mode) & 0o077:
+                    print(f"FAIL host {host.host_id}: SSH key must not be group- or world-readable")
+                    host_problems += 1
+
+                known_hosts = host.ssh.known_hosts_path
+                if not known_hosts.exists():
+                    print(f"FAIL host {host.host_id}: SSH known_hosts file missing")
+                    host_problems += 1
+                elif not known_hosts.is_file():
+                    print(f"FAIL host {host.host_id}: SSH known_hosts is not a regular file")
+                    host_problems += 1
+
+            if host_problems == 0:
+                print(f"PASS host {host.host_id}: SSH key and known_hosts")
+            else:
+                problems += host_problems
+    elif cfg.tools.exec_enabled:
         from .tools.host_exec import _configured_target
 
         if cfg.tools.developer_enabled:

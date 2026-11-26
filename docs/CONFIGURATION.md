@@ -27,7 +27,93 @@ kule serve --config config.toml
 
 ## Host execution
 
-Host execution is disabled by default. For the current SSH backend, enabling it requires both `tools.exec_enabled = true` and `KULE_HOST_EXEC_ENABLED=1`, plus a fixed `KULE_HOST_EXEC_TARGET=user@host` (a DNS hostname or IPv4 address; no IPv6 literal, port, path or SSH options). Set `tools.timeout_seconds` to at least 15 and keep `tools.developer_enabled = false` in this runtime. A dedicated SSH identity and pinned known-hosts file are expected at `/var/run/kule-host-ssh/`. Keep the service account restricted and allow execution only to the approved identity-provider group.
+Host execution is disabled by default. For single-host installations without `[[hosts]]`, enabling it requires both `tools.exec_enabled = true` and `KULE_HOST_EXEC_ENABLED=1`, plus a fixed `KULE_HOST_EXEC_TARGET=user@host` (a DNS hostname or IPv4 address; no IPv6 literal, port, path or SSH options). Set `tools.timeout_seconds` to at least 15 and keep `tools.developer_enabled = false` in this runtime. A dedicated SSH identity and pinned known-hosts file are expected at `/var/run/kule-host-ssh/`. Keep the service account restricted and allow execution only to the approved identity-provider group.
+
+## Multi-host inventory (`[[hosts]]`)
+
+Kule supports an explicit, immutable inventory of SSH-managed hosts. When one or more `[[hosts]]` tables are defined, Kule replaces the single-host execution tool with multi-host tools:
+- `host_list`: discover non-secret metadata for authorized hosts.
+- `host_status`: inspect host reachability, latency, and platform details.
+- `host_exec`: run bounded Bash scripts on explicitly approved hosts.
+
+### Host structure and fields
+
+Each host entry supports the following tables and keys:
+
+- `[[hosts]]`:
+  - `host_id`: Unique lowercase identifier slug (`^[a-z0-9][a-z0-9._-]{0,63}$`, no `..`).
+  - `transport`: Transport type, currently `"ssh"` (default: `"ssh"`).
+  - `platform`: Target operating system, `"macos"` or `"linux"`.
+  - `description`: Optional non-secret description (max 256 chars).
+- `[hosts.ssh]`:
+  - `host`: Hostname or IP address (no wildcards or embedded credentials).
+  - `user`: SSH username (`^[A-Za-z_][A-Za-z0-9._-]{0,63}$`).
+  - `port`: Port number between 1 and 65535 (default: 22).
+  - `key_path`: Path to the dedicated SSH private key (mode 0600, not group/world-readable).
+  - `known_hosts_path`: Path to the pinned `known_hosts` file.
+- `[hosts.policy]`:
+  - `read_groups`: Array of identity-provider groups allowed to see the host and query `host_status`.
+  - `exec_groups`: Array of identity-provider groups allowed to run `host_exec`.
+  - `exec_enabled`: Boolean flag controlling execution on this host. **Defaults to `false`**.
+
+### Execution safety & per-host opt-in
+
+Privileged host execution requires a two-layer opt-in:
+1. **Server level**: `tools.exec_enabled = true` in `[tools]`. Defaults to `false`.
+2. **Per-host level**: `exec_enabled = true` in `[hosts.policy]`. Defaults to `false`.
+
+If `tools.exec_enabled = false`, no `host_exec` tool is registered regardless of per-host settings. For any host with `policy.exec_enabled = false`, execution calls fail closed. Developer runtime sharing remains strictly prohibited (`tools.developer_enabled = false`).
+
+### Multi-host example configuration
+
+```toml
+# macOS workstation example (zombie)
+[[hosts]]
+host_id = "zombie"
+transport = "ssh"
+platform = "macos"
+description = "macOS developer workstation"
+
+[hosts.ssh]
+host = "zombie.local"
+user = "operator"
+port = 22
+key_path = "/var/run/kule-host-ssh/zombie_id_ed25519"
+known_hosts_path = "/var/run/kule-host-ssh/known_hosts"
+
+[hosts.policy]
+read_groups = ["kule-users"]
+exec_groups = ["kule-exec"]
+exec_enabled = false  # exec disabled by default; per-host opt-in required
+
+# Linux server example (gurbet)
+[[hosts]]
+host_id = "gurbet"
+transport = "ssh"
+platform = "linux"
+description = "Linux production host"
+
+[hosts.ssh]
+host = "gurbet.internal"
+user = "kule"
+port = 22
+key_path = "/var/run/kule-host-ssh/gurbet_id_ed25519"
+known_hosts_path = "/var/run/kule-host-ssh/known_hosts"
+
+[hosts.policy]
+read_groups = ["kule-users", "linux-operators"]
+exec_groups = ["kule-exec"]
+exec_enabled = false  # exec disabled by default; per-host opt-in required
+```
+
+### Diagnostics (`kule doctor`)
+
+Run `kule doctor` to perform an offline preflight check of your configuration:
+- For each configured SSH host, verifies that `key_path` exists, is a regular file, and is not group- or world-readable (mode 0600).
+- Verifies that `known_hosts_path` exists and is a regular file.
+- Outputs redacted non-secret pass/fail results identified by `host_id`.
+- Never displays or echoes SSH keys or secret values.
+
 
 ## Upgrading an existing installation
 
