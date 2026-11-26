@@ -89,11 +89,29 @@ class AuditLog:
         finally:
             os.close(fd)
 
-    def write(self, event: str, **fields: Any) -> None:
+    def write(
+        self,
+        event: str,
+        *,
+        host_id: str | None = None,
+        transport: str | None = None,
+        request_id: str | None = None,
+        grant_id: str | None = None,
+        **fields: Any,
+    ) -> None:
+        payload: dict[str, Any] = dict(fields)
+        if host_id is not None:
+            payload["host_id"] = host_id
+        if transport is not None:
+            payload["transport"] = transport
+        if request_id is not None:
+            payload["request_id"] = request_id
+        if grant_id is not None:
+            payload["grant_id"] = grant_id
         record = {
             "ts": datetime.now(UTC).isoformat(timespec="milliseconds"),
             "event": event,
-            **redact(fields),
+            **redact(payload),
         }
 
         def append(fd: int) -> None:

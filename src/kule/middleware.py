@@ -20,7 +20,8 @@ from fastmcp.tools.base import Tool, ToolResult
 from fastmcp.utilities.versions import VersionSpec
 
 from .audit import AuditLog
-from .authz import Caller, Policy, Role
+from .authz import EXEC, HOST_SCOPED, Caller, HostOperation, Policy, Role
+from .hosts import HostRegistry
 from .integrations import IntegrationRegistry, is_integration_tool
 
 ClaimsGetter = Callable[[], Mapping[str, Any] | None]
@@ -77,6 +78,7 @@ class OperatorMiddleware(Middleware):
         max_output_bytes: int = 64 * 1024,
         claims_getter: ClaimsGetter = claims_from_request,
         integrations: IntegrationRegistry | None = None,
+        hosts: HostRegistry | None = None,
     ) -> None:
         self.policy = policy
         self.audit = audit
@@ -85,6 +87,7 @@ class OperatorMiddleware(Middleware):
         self.max_output_bytes = max_output_bytes
         self.claims_getter = claims_getter
         self.integrations = integrations
+        self.hosts = hosts
 
     async def _audit(self, event: str, **fields: Any) -> None:
         # flock + fsync block; keep them off the event loop.
@@ -110,6 +113,23 @@ class OperatorMiddleware(Middleware):
             sub=caller.subject if caller else None,
             roles=sorted(role.value for role in roles),
         )
+        if caller is not None and caller.grant_id is not None:
+            who["grant_id"] = caller.grant_id
+        else:
+            who.pop("grant_id", None)
+
+    def _annotate_target(self, args: Mapping[str, Any], who: dict[str, Any]) -> None:
+        raw_host_id = args.get("host_id")
+        if isinstance(raw_host_id, str) and raw_host_id:
+            who["host_id"] = raw_host_id
+            if self.hosts is not None:
+                host = self.hosts.get(raw_host_id)
+                if host is not None:
+                    who["transport"] = host.transport.value
+        if "grant_id" not in who:
+            raw_grant_id = args.get("grant_id")
+            if isinstance(raw_grant_id, str) and raw_grant_id.strip():
+                who["grant_id"] = raw_grant_id.strip()
 
     def _authorize(
         self,
@@ -128,7 +148,20 @@ class OperatorMiddleware(Middleware):
                 roles, tool.tags, args, parameter_names=parameter_names
             )
             return ok, reason, "integration"
-        return (*self.policy.allows(caller, tool.tags), self.policy.tier_of(tool.tags))
+        ok, reason = self.policy.allows(caller, tool.tags)
+        tier = self.policy.tier_of(tool.tags)
+        if ok and HOST_SCOPED in tool.tags:
+            op = HostOperation.EXEC if tier == EXEC else HostOperation.READ
+            raw_host_id = args.get("host_id")
+            host_ok, host_reason = self.policy.allows_host(
+                caller,
+                self.hosts,
+                raw_host_id if isinstance(raw_host_id, str) else None,
+                op,
+            )
+            if not host_ok:
+                return False, host_reason, tier
+        return ok, reason, tier
 
     def _annotate_integration(self, tool: Tool, who: dict[str, Any]) -> None:
         if self.integrations is None:
@@ -168,7 +201,13 @@ class OperatorMiddleware(Middleware):
                 ):
                     visible.append(tool)
             elif self.policy.allows(caller, tool.tags)[0]:
-                visible.append(tool)
+                if HOST_SCOPED in tool.tags:
+                    tier = self.policy.tier_of(tool.tags)
+                    op = HostOperation.EXEC if tier == EXEC else HostOperation.READ
+                    if self.policy.authorized_hosts(caller, self.hosts, op):
+                        visible.append(tool)
+                else:
+                    visible.append(tool)
         return visible
 
     async def on_call_tool(
@@ -182,8 +221,9 @@ class OperatorMiddleware(Middleware):
         audit_args = _audit_arguments(name, args)
         caller = self._caller()
         roles = self._roles(caller)
-        who = {"call_id": call_id, "tool": name}
+        who = {"call_id": call_id, "request_id": call_id, "tool": name}
         self._update_who(who, caller, roles)
+        self._annotate_target(args, who)
 
         if self.kill_switch.exists():
             await self._audit("denied", reason="kill switch", args=audit_args, **who)
@@ -203,6 +243,7 @@ class OperatorMiddleware(Middleware):
         caller = self._caller()
         roles = self._roles(caller)
         self._update_who(who, caller, roles)
+        self._annotate_target(args, who)
         self._annotate_integration(tool, who)
         parameter_names = _tool_parameter_names(tool)
 
@@ -239,6 +280,7 @@ class OperatorMiddleware(Middleware):
         caller = self._caller()
         roles = self._roles(caller)
         self._update_who(who, caller, roles)
+        self._annotate_target(args, who)
         ok, reason, _ = self._authorize(tool, caller, roles, args, parameter_names)
         if not ok:
             await self._audit(
@@ -309,11 +351,14 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
         return sanitized
     if tool == "host_exec":
         metadata = _audit_text_digest(args.get("script"), 16384)
-        return {
+        out: dict[str, Any] = {
             "script_bytes": metadata.get("bytes"),
             "script_sha256": metadata.get("sha256"),
             "script_valid": metadata["valid"],
         }
+        if isinstance(args.get("host_id"), str):
+            out["host_id"] = args["host_id"]
+        return out
     if tool.startswith("oh_"):
         # Store routing metadata and a prompt digest, never message bodies.
         from .tools.openhands import audit_arguments

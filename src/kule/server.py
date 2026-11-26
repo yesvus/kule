@@ -101,6 +101,7 @@ def build_server(
         max_output_bytes=cfg.tools.max_output_bytes,
         claims_getter=claims_getter,
         integrations=integrations if integrations is not None else IntegrationRegistry(),
+        hosts=cfg.host_registry() if cfg.hosts else None,
     )
     mcp = FastMCP(
         name="kule",

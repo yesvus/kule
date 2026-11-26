@@ -21,8 +21,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .hosts import HostConfig, HostRegistry
+
 READ, OPERATE, EXEC, WORKSPACE = "read", "operate", "exec", "workspace"
 TIERS = (READ, OPERATE, EXEC, WORKSPACE)
+HOST_SCOPED = "host-scoped"
+
+
+class HostOperation(StrEnum):
+    READ = "read"
+    EXEC = "exec"
 
 
 class Role(StrEnum):
@@ -39,6 +47,7 @@ class Caller:
     # Unix seconds from a separately granted break-glass claim. The raw claim is
     # never trusted beyond this bounded timestamp.
     breakglass_expires_at: float | None = None
+    grant_id: str | None = None
 
 
 def normalize_groups(raw: Any) -> frozenset[str]:
@@ -117,11 +126,13 @@ class Policy:
         groups = normalize_groups(claims.get(self.groups_claim))
         username = claims.get("preferred_username") or claims.get("email") or sub
         expiry = _timestamp(claims.get(self.breakglass_expires_claim))
+        grant_id = _grant_id(claims.get("breakglass_grant_id") or claims.get("grant_id"))
         return Caller(
             subject=sub,
             username=str(username),
             groups=groups,
             breakglass_expires_at=expiry,
+            grant_id=grant_id,
         )
 
     def roles(self, caller: Caller | None, now: float | None = None) -> frozenset[Role]:
@@ -185,6 +196,70 @@ class Policy:
             if self.exec_group not in caller.groups:
                 return False, f"caller is not in {self.exec_group}"
         return True, "ok"
+
+    def allows_host(
+        self,
+        caller: Caller | None,
+        registry: HostRegistry | None,
+        host_id: str | None,
+        operation: HostOperation | str,
+    ) -> tuple[bool, str]:
+        """Evaluate caller x host_id x operation fail-closed."""
+        if caller is None:
+            return False, "unauthenticated"
+        if registry is None:
+            return False, "host registry unavailable"
+        if not isinstance(operation, str):
+            return False, "unknown host operation"
+        try:
+            op = operation if isinstance(operation, HostOperation) else HostOperation(operation)
+        except ValueError:
+            return False, f"unknown host operation '{operation}'"
+        if not isinstance(host_id, str) or not host_id:
+            return False, "missing host_id"
+        host = registry.get(host_id)
+        if host is None:
+            return False, f"unknown host '{host_id}'"
+        if op is HostOperation.READ:
+            if not host.policy.read_groups:
+                return False, f"no read groups configured for host '{host_id}'"
+            if not (caller.groups & host.policy.read_groups):
+                return False, f"caller is not authorized to read host '{host_id}'"
+            return True, "ok"
+        if not self.exec_enabled:
+            return False, "exec tier is disabled"
+        if not host.policy.exec_enabled:
+            return False, f"exec is disabled for host '{host_id}'"
+        if not host.policy.exec_groups:
+            return False, f"no exec groups configured for host '{host_id}'"
+        if not (caller.groups & host.policy.exec_groups):
+            return False, f"caller is not authorized to exec on host '{host_id}'"
+        return True, "ok"
+
+    def authorized_hosts(
+        self,
+        caller: Caller | None,
+        registry: HostRegistry | None,
+        operation: HostOperation | str = HostOperation.READ,
+    ) -> tuple[HostConfig, ...]:
+        """Return only hosts the caller is authorized to access for operation."""
+        if caller is None or registry is None:
+            return ()
+        return tuple(
+            host
+            for host in registry
+            if self.allows_host(caller, registry, host.host_id, operation)[0]
+        )
+
+
+def _grant_id(raw: Any) -> str | None:
+    """Accept only a short, printable, non-empty grant identifier."""
+    if not isinstance(raw, str):
+        return None
+    stripped = raw.strip()
+    if not stripped or len(stripped) > 128 or any(ch in "\x00\r\n\t" for ch in stripped):
+        return None
+    return stripped
 
 
 def _timestamp(raw: Any) -> float | None:
