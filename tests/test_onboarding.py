@@ -1,5 +1,6 @@
 """First-run setup creates no credentials and diagnostics never print them."""
 
+import json
 import stat
 from pathlib import Path
 
@@ -314,7 +315,9 @@ def _append_host_entry(
     host: str = "host.example.com",
     user: str = "operator",
     exec_enabled: bool = False,
+    exec_groups: list[str] | None = None,
 ) -> None:
+    groups = '["kule-exec"]' if exec_groups is None else json.dumps(exec_groups)
     config_path.write_text(
         config_path.read_text()
         + f"""
@@ -331,7 +334,7 @@ key_path = "{key_path}"
 known_hosts_path = "{known_hosts_path}"
 [hosts.policy]
 read_groups = ["kule-users"]
-exec_groups = ["kule-exec"]
+exec_groups = {groups}
 exec_enabled = {"true" if exec_enabled else "false"}
 """
     )
@@ -475,6 +478,8 @@ def test_doctor_multi_host_no_secret_leakage(tmp_path, monkeypatch, capsys):
     assert secret_oidc not in output
     assert secret_jwt not in output
     assert "id_ed25519_secret_token_12345" not in output
+    assert str(key_path) not in output
+    assert str(known_hosts_path) not in output
     assert "FAIL host zombie: SSH key must not be group- or world-readable" in output
 
 
@@ -505,3 +510,64 @@ def test_doctor_multi_host_multiple_hosts_mixed_status(tmp_path, monkeypatch, ca
     stdout = capsys.readouterr().out
     assert "PASS host zombie: SSH key and known_hosts" in stdout
     assert "FAIL host gurbet: SSH key file missing" in stdout
+
+
+def test_doctor_multi_host_symlink_key_fails(tmp_path, monkeypatch, capsys):
+    path = initialize(tmp_path)
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir(mode=0o700)
+    real_key = ssh_dir / "real_key"
+    real_key.write_text("private-key-data")
+    real_key.chmod(0o600)
+    symlink_key = ssh_dir / "symlink_key"
+    symlink_key.symlink_to(real_key)
+    known_hosts_path = ssh_dir / "known_hosts"
+    known_hosts_path.write_text("host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...")
+
+    _append_host_entry(path, "zombie", symlink_key, known_hosts_path, platform="macos")
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)
+
+    assert main(["doctor", "--config", str(path)]) == 1
+    stdout = capsys.readouterr().out
+    assert "FAIL host zombie: SSH key is not a regular file" in stdout
+
+
+def test_doctor_multi_host_symlink_known_hosts_fails(tmp_path, monkeypatch, capsys):
+    path = initialize(tmp_path)
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir(mode=0o700)
+    key_path = ssh_dir / "id_ed25519"
+    key_path.write_text("private-key-data")
+    key_path.chmod(0o600)
+    real_kh = ssh_dir / "real_known_hosts"
+    real_kh.write_text("host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...")
+    symlink_kh = ssh_dir / "symlink_known_hosts"
+    symlink_kh.symlink_to(real_kh)
+
+    _append_host_entry(path, "zombie", key_path, symlink_kh, platform="macos")
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)
+
+    assert main(["doctor", "--config", str(path)]) == 1
+    stdout = capsys.readouterr().out
+    assert "FAIL host zombie: SSH known_hosts is not a regular file" in stdout
+
+
+def test_doctor_multi_host_key_mode_000_fails(tmp_path, monkeypatch, capsys):
+    path = initialize(tmp_path)
+    ssh_dir = tmp_path / "ssh"
+    ssh_dir.mkdir(mode=0o700)
+    key_path = ssh_dir / "id_ed25519"
+    key_path.write_text("private-key-data")
+    key_path.chmod(0o000)
+    known_hosts_path = ssh_dir / "known_hosts"
+    known_hosts_path.write_text("host ssh-ed25519 AAAAC3NzaC1lZDI1NTE5...")
+
+    _append_host_entry(path, "zombie", key_path, known_hosts_path, platform="macos")
+    monkeypatch.setenv("KULE_OIDC_CLIENT_SECRET", "test-secret")
+    monkeypatch.setenv("KULE_JWT_SIGNING_KEY", "x" * 48)
+
+    assert main(["doctor", "--config", str(path)]) == 1
+    stdout = capsys.readouterr().out
+    assert "FAIL host zombie: SSH key must be readable by owner" in stdout

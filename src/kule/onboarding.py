@@ -170,8 +170,11 @@ def doctor(path: Path) -> int:
                 if not key.exists():
                     print(f"FAIL host {host.host_id}: SSH key file missing")
                     host_problems += 1
-                elif not key.is_file():
+                elif key.is_symlink() or not key.is_file():
                     print(f"FAIL host {host.host_id}: SSH key is not a regular file")
+                    host_problems += 1
+                elif not (key.stat().st_mode & stat.S_IRUSR):
+                    print(f"FAIL host {host.host_id}: SSH key must be readable by owner")
                     host_problems += 1
                 elif stat.S_IMODE(key.stat().st_mode) & 0o077:
                     print(f"FAIL host {host.host_id}: SSH key must not be group- or world-readable")
@@ -181,7 +184,7 @@ def doctor(path: Path) -> int:
                 if not known_hosts.exists():
                     print(f"FAIL host {host.host_id}: SSH known_hosts file missing")
                     host_problems += 1
-                elif not known_hosts.is_file():
+                elif known_hosts.is_symlink() or not known_hosts.is_file():
                     print(f"FAIL host {host.host_id}: SSH known_hosts is not a regular file")
                     host_problems += 1
 
