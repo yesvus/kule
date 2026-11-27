@@ -282,7 +282,16 @@ class OperatorMiddleware(Middleware):
         if size > self.max_output_bytes:
             await self._audit("oversize", duration_ms=_ms(start), bytes=size, **who)
             raise ToolError(f"tool output exceeds {self.max_output_bytes} bytes")
-        await self._audit("result", duration_ms=_ms(start), bytes=size, **who)
+        if _is_host_exec_timeout(name, result):
+            await self._audit(
+                "timeout",
+                duration_ms=_ms(start),
+                bytes=size,
+                **_host_exec_timeout_audit_fields(result),
+                **who,
+            )
+        else:
+            await self._audit("result", duration_ms=_ms(start), bytes=size, **who)
         return result
 
 
@@ -338,6 +347,30 @@ def _audit_arguments(tool: str, args: dict[str, Any]) -> dict[str, Any]:
             result.update({"text_bytes": body.get("bytes"), "text_valid": body["valid"]})
         return result
     return args
+
+
+def _is_host_exec_timeout(tool: str, result: ToolResult) -> bool:
+    if tool != "host_exec":
+        return False
+    structured = getattr(result, "structured_content", None)
+    return isinstance(structured, Mapping) and structured.get("timed_out") is True
+
+
+def _host_exec_timeout_audit_fields(result: ToolResult) -> dict[str, Any]:
+    structured = getattr(result, "structured_content", None)
+    if not isinstance(structured, Mapping):
+        return {}
+    fields: dict[str, Any] = {}
+    timeout_seconds = structured.get("timeout_seconds")
+    if isinstance(timeout_seconds, int | float) and not isinstance(timeout_seconds, bool):
+        fields["timeout_seconds"] = timeout_seconds
+    returncode = structured.get("returncode")
+    if isinstance(returncode, int) and not isinstance(returncode, bool):
+        fields["returncode"] = returncode
+    truncated = structured.get("truncated")
+    if isinstance(truncated, bool):
+        fields["truncated"] = truncated
+    return fields
 
 
 def _result_size(result: ToolResult) -> int:

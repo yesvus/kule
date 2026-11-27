@@ -23,7 +23,7 @@ Kule gives MCP-compatible assistants a secure way to inspect and operate approve
 
 - **MCP-native:** Connect through an authenticated Streamable HTTP endpoint.
 - **Identity-aware:** OAuth/OIDC login and group-based access policies.
-- **Controlled execution:** Explicitly enabled host operations, with time and output limits.
+- **Controlled execution:** Explicitly enabled host operations, with time and output limits (on host execution timeout, captured partial output is returned; processes that detach with setsid or double-fork are not stopped at the deadline).
 - **Auditable:** Structured events and verifiable hash chains. Redaction is best-effort; protect audit files against unauthorized writes.
 - **Emergency stop:** Disable tool calls using a server-side kill-switch file.
 
