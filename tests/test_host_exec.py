@@ -129,10 +129,12 @@ def _assert_process_gone(pid: int, timeout: float = 1.0) -> None:
 @pytest.mark.parametrize(
     "configured,expected",
     [
-        (15, 5),
-        (30, 20),
-        (45, 35),
-        (110, 90),
+        (15, "5.0"),
+        (15.5, "5.5"),
+        (25.3, "15.3"),
+        (30, "20.0"),
+        (45, "35.0"),
+        (110, "90.0"),
     ],
 )
 async def test_host_exec_description_states_effective_timeout(
@@ -145,8 +147,78 @@ async def test_host_exec_description_states_effective_timeout(
     async with Client(mcp) as client:
         tools = {t.name: t for t in await client.list_tools()}
     tool = tools["host_exec"]
-    assert f"{expected}s" in (tool.description or "")
+    desc = tool.description or ""
+    assert f"{expected}s" in desc
+    assert (
+        "processes that detach with setsid or double-fork are not stopped at the deadline" in desc
+    )
     assert set(tool.input_schema.get("properties", {})) == {"script"}
+
+
+async def test_host_exec_fractional_timeout_kept_and_formatted_consistently(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    _enable_fake_ssh(monkeypatch, tmp_path)
+    assert (
+        host_exec._effective_timeout_seconds(make_cfg(exec_enabled=True, timeout_seconds=15.5))
+        == 5.5
+    )
+    assert (
+        host_exec._effective_timeout_seconds(make_cfg(exec_enabled=True, timeout_seconds=15.25))
+        == 5.25
+    )
+    assert (
+        host_exec._effective_timeout_seconds(make_cfg(exec_enabled=True, timeout_seconds=15.3))
+        == 5.3
+    )
+    assert " 5.5s " in host_exec._argv(5.5)[-1]
+    assert " 5.25s " in host_exec._argv(5.25)[-1]
+
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=15.5)
+    claims.value = {"sub": "owner", "preferred_username": "owner", "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+    async with Client(mcp) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert "5.5s" in (tools["host_exec"].description or "")
+        result = await client.call_tool("host_exec", {"script": "echo ok\n"})
+    assert result.data["timed_out"] is False
+    assert result.data["timeout_seconds"] == 5.5
+
+    # Also verify a fractional budget actually enforces timeout and reports consistently.
+    monkeypatch.setattr(host_exec, "_effective_timeout_seconds", lambda _cfg: 0.5)
+    mcp_short = build_server(cfg, claims_getter=claims)
+    async with Client(mcp_short) as client:
+        tools = {t.name: t for t in await client.list_tools()}
+        assert "0.5s" in (tools["host_exec"].description or "")
+        timed = await client.call_tool("host_exec", {"script": "echo frac-start\nsleep 10\n"})
+    assert timed.data["timed_out"] is True
+    assert timed.data["timeout_seconds"] == 0.5
+    assert timed.data["returncode"] == 124
+    assert "frac-start" in timed.data["output"]
+    events = _audit_events(cfg.audit.path)
+    assert events[-1]["event"] == "timeout"
+    assert events[-1]["timeout_seconds"] == 0.5
+
+
+@pytest.mark.parametrize("status", [124, 137])
+async def test_host_exec_immediate_exit_124_or_137_not_timed_out(
+    make_cfg, claims, monkeypatch, tmp_path, status
+):
+    _enable_fake_ssh(monkeypatch, tmp_path)
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=30)
+    claims.value = {"sub": "owner", "preferred_username": "owner", "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+    async with Client(mcp) as client:
+        result = await client.call_tool(
+            "host_exec",
+            {"script": f"echo immediate-{status}\nexit {status}\n"},
+        )
+    assert result.data["timed_out"] is False
+    assert result.data["returncode"] == status
+    assert f"immediate-{status}" in result.data["output"]
+    events = _audit_events(cfg.audit.path)
+    assert [e["event"] for e in events] == ["call", "result"]
+    assert verify(cfg.audit.path) == (True, 2)
 
 
 async def test_host_exec_normal_call_unchanged(make_cfg, claims, monkeypatch, tmp_path):
@@ -303,6 +375,87 @@ async def test_host_exec_cancellation_kills_process_group(monkeypatch, tmp_path)
 
     assert pidfile.is_file()
     _assert_process_gone(int(pidfile.read_text().strip()))
+
+
+async def test_host_exec_chatty_script_killed_at_deadline_returns_promptly(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    _enable_fake_ssh(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        host_exec, "_argv", lambda _seconds: ["/bin/bash", "--noprofile", "--norc", "-s"]
+    )
+    monkeypatch.setattr(host_exec, "_effective_timeout_seconds", lambda _cfg: 0.4)
+    monkeypatch.setattr(host_exec, "_LOCAL_TIMEOUT_GRACE", 0.0)
+    monkeypatch.setattr(host_exec, "_KILL_GRACE", 0.3)
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=15, max_output_bytes=2048)
+    claims.value = {"sub": "owner", "preferred_username": "owner", "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+
+    pidfile = tmp_path / "chatty.pid"
+    script = (
+        f"yes AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA &\n"
+        f"echo $! > {shlex.quote(str(pidfile))}\n"
+        f"yes BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB >&2\n"
+    )
+    started = time.monotonic()
+    async with Client(mcp) as client:
+        result = await client.call_tool("host_exec", {"script": script})
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.5
+    assert result.data["timed_out"] is True
+    assert result.data["timeout_seconds"] == 0.4
+    assert result.data["truncated"] is True
+    assert len(result.data["output"].encode("utf-8")) <= 128
+    assert pidfile.is_file()
+    _assert_process_gone(int(pidfile.read_text().strip()))
+    events = _audit_events(cfg.audit.path)
+    assert [e["event"] for e in events] == ["call", "timeout"]
+    assert verify(cfg.audit.path) == (True, 2)
+
+
+async def test_host_exec_drains_output_during_sigterm_termination(
+    make_cfg, claims, monkeypatch, tmp_path
+):
+    _enable_fake_ssh(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        host_exec, "_argv", lambda _seconds: ["/bin/bash", "--noprofile", "--norc", "-s"]
+    )
+    monkeypatch.setattr(host_exec, "_effective_timeout_seconds", lambda _cfg: 0.3)
+    monkeypatch.setattr(host_exec, "_LOCAL_TIMEOUT_GRACE", 0.0)
+    # Use a long _KILL_GRACE so blocking on an undrained pipe during wait()
+    # would delay return by >= 2.3s instead of exiting promptly on SIGTERM.
+    monkeypatch.setattr(host_exec, "_KILL_GRACE", 2.0)
+    cfg = make_cfg(exec_enabled=True, timeout_seconds=15, max_output_bytes=2048)
+    claims.value = {"sub": "owner", "preferred_username": "owner", "groups": ["ops", "ops-exec"]}
+    mcp = build_server(cfg, claims_getter=claims)
+
+    pidfile = tmp_path / "sleeper.pid"
+    # On SIGTERM, write 256 KiB (exceeding the 64 KiB pipe buffer) then exit.
+    script = (
+        "trap 'dd if=/dev/zero bs=4096 count=64 2>/dev/null | tr \"\\0\" Z; exit 0' TERM\n"
+        "echo ready\n"
+        "sleep 30 &\n"
+        f"echo $! > {shlex.quote(str(pidfile))}\n"
+        "wait\n"
+    )
+    started = time.monotonic()
+    async with Client(mcp) as client:
+        result = await client.call_tool("host_exec", {"script": script})
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.3
+    assert result.data["timed_out"] is True
+    assert result.data["timeout_seconds"] == 0.3
+    assert result.data["returncode"] == 124
+    assert result.data["truncated"] is True
+    assert "ready" in result.data["output"]
+    assert len(result.data["output"].encode("utf-8")) <= 128
+    assert pidfile.is_file()
+    _assert_process_gone(int(pidfile.read_text().strip()))
+    events = _audit_events(cfg.audit.path)
+    assert [e["event"] for e in events] == ["call", "timeout"]
+    assert verify(cfg.audit.path) == (True, 2)
 
 
 async def test_other_tools_keep_timeout_behaviour_when_host_exec_enabled(
