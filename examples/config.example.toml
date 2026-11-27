@@ -23,3 +23,56 @@ scratch_dir = "./.local/scratch"
 exec_enabled = false
 timeout_seconds = 30
 max_output_bytes = 65536
+
+# -----------------------------------------------------------------------------
+# Multi-host SSH inventory (optional)
+# -----------------------------------------------------------------------------
+# When one or more [[hosts]] entries are defined, Kule registers multi-host
+# tools: host_list and host_status are always available, while host_exec is
+# registered conditionally only when BOTH global [tools] exec_enabled = true
+# AND at least one host has exec_enabled = true (with non-empty exec_groups).
+#
+# Multi-host execution security:
+# - tools.exec_enabled defaults to false.
+# - Each host policy also has exec_enabled = false by default.
+# - Both server-level tools.exec_enabled = true AND per-host policy.exec_enabled = true
+#   (with non-empty exec_groups) are required for host_exec to be registered and enabled.
+# - Group authorization is checked per host:
+#   * read_groups: IdP groups authorized to see and check status of the host.
+#   * exec_groups: IdP groups authorized to execute scripts on the host.
+# - SSH private keys must be owner-readable with no group- or world-readable bits (for example, mode 0600).
+
+# Example: macOS workstation (zombie)
+# [[hosts]]
+# host_id = "zombie"
+# transport = "ssh"
+# platform = "macos"
+# description = "macOS workstation"
+# [hosts.ssh]
+# host = "zombie.local"
+# user = "operator"
+# port = 22
+# key_path = "/var/run/kule-host-ssh/zombie_id_ed25519"
+# known_hosts_path = "/var/run/kule-host-ssh/known_hosts"
+# [hosts.policy]
+# read_groups = ["kule-users"]
+# exec_groups = ["kule-exec"]
+# exec_enabled = false  # exec disabled by default; per-host opt-in required
+
+# Example: Linux server (gurbet)
+# [[hosts]]
+# host_id = "gurbet"
+# transport = "ssh"
+# platform = "linux"
+# description = "Linux production server"
+# [hosts.ssh]
+# host = "gurbet.internal"
+# user = "kule"
+# port = 22
+# key_path = "/var/run/kule-host-ssh/gurbet_id_ed25519"
+# known_hosts_path = "/var/run/kule-host-ssh/known_hosts"
+# [hosts.policy]
+# read_groups = ["kule-users", "linux-operators"]
+# exec_groups = ["kule-exec"]
+# exec_enabled = false  # exec disabled by default; per-host opt-in required
+
