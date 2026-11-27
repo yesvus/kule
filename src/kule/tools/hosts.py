@@ -18,9 +18,7 @@ from ..transport import HostTransport, TransportError
 
 
 def _bounded_exec_timeout(tool_timeout_seconds: float) -> float:
-    if tool_timeout_seconds >= 10:
-        return min(90.0, float(tool_timeout_seconds) - 5.0)
-    return max(1.0, float(tool_timeout_seconds) - 1.0)
+    return min(90.0, max(1.0, float(tool_timeout_seconds) - 5.0))
 
 
 def register(

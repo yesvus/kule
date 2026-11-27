@@ -16,7 +16,8 @@ from helpers import OPERATOR, OUTSIDER
 from kule.audit import verify as verify_audit
 from kule.hosts import HostConfig, HostPlatform, HostPolicy, HostTransportType, SshTargetConfig
 from kule.server import build_server
-from kule.ssh_transport import SshHostTransport
+from kule.ssh_transport import SshHostTransport, _remote_exec_command
+from kule.tools.hosts import _bounded_exec_timeout
 from kule.transport import (
     ExecResult,
     HostKeyVerificationError,
@@ -165,7 +166,9 @@ assert "/usr/bin/timeout" not in cmd, f"unexpected GNU timeout in {cmd}"
 if cmd == "uname -srm":
     sys.stdout.write("Darwin 24.1.0 arm64\\n")
     sys.exit(0)
-if cmd == "/bin/bash --noprofile --norc -s":
+if "/bin/bash --noprofile --norc -s" in cmd:
+    assert "command -v timeout" in cmd
+    assert "kill -TERM" in cmd
     script = sys.stdin.read()
     assert "echo hello-zombie" in script
     sys.stdout.write("hello-zombie token=ghp_1234567890123456789012345\\n")
@@ -620,3 +623,133 @@ def test_host_exec_rejects_shared_developer_runtime(make_cfg, claims, tmp_path: 
     )
     with pytest.raises(RuntimeError, match="developer runtime"):
         build_server(cfg, claims_getter=claims, host_transport=FakeMultiHostTransport())
+
+
+async def test_remote_exec_command_portable_watchdog_terminates_child():
+    """Portable remote wrapper enforces timeout even when `timeout` binary is absent."""
+    import asyncio
+
+    cmd = _remote_exec_command(0.5)
+    assert "/usr/bin/timeout" not in cmd
+
+    proc = await asyncio.create_subprocess_shell(
+        cmd,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env={"PATH": "/usr/bin:/bin"},
+    )
+    stdout, _ = await asyncio.wait_for(
+        proc.communicate(b"echo before-sleep\nsleep 10\necho after-sleep\n"),
+        timeout=5.0,
+    )
+    assert b"before-sleep" in stdout
+    assert b"after-sleep" not in stdout
+    assert proc.returncode != 0
+
+
+async def test_ssh_timeout_preserves_partial_stdout_and_stderr(tmp_path: Path):
+    zombie = _make_host(tmp_path, "zombie", platform=HostPlatform.MACOS, exec_enabled=True)
+    fake_ssh = _make_fake_ssh(
+        tmp_path,
+        """
+import sys, time
+sys.stdout.write("partial-out\\n")
+sys.stdout.flush()
+sys.stderr.write("partial-err\\n")
+sys.stderr.flush()
+time.sleep(30)
+""",
+    )
+    transport = SshHostTransport(ssh_bin=fake_ssh)
+    res = await transport.exec_script(
+        zombie, "sleep 30", timeout_seconds=0.4, max_output_bytes=1024
+    )
+    assert res.timed_out is True
+    assert res.returncode is None
+    assert "partial-out" in res.output
+    assert "partial-err" in res.output
+
+    read_res = await transport.read_command(
+        zombie, ["tail", "-f", "/dev/null"], timeout_seconds=0.4, max_output_bytes=1024
+    )
+    assert read_res.timed_out is True
+    assert "partial-out" in read_res.output
+
+
+async def test_ssh_non_executable_bin_and_subprocess_oserror_fail_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    host = _make_host(tmp_path, "gurbet")
+    non_exec = tmp_path / "non_exec_ssh"
+    non_exec.write_text("#!/bin/sh\nexit 0\n")
+    non_exec.chmod(0o644)
+
+    with pytest.raises(TransportConfigError, match="not executable"):
+        await SshHostTransport(ssh_bin=str(non_exec)).status(host, timeout_seconds=5)
+
+    exec_bin = _make_fake_ssh(tmp_path, "import sys; sys.exit(0)")
+
+    async def _boom(*args, **kwargs):
+        raise PermissionError("EACCES")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _boom)
+    with pytest.raises(TransportConfigError, match="PermissionError"):
+        await SshHostTransport(ssh_bin=exec_bin).status(host, timeout_seconds=5)
+
+
+async def test_ssh_exit_255_remote_script_not_misclassified(tmp_path: Path):
+    host = _make_host(tmp_path, "gurbet", exec_enabled=True)
+
+    # 1. Remote script produces stdout and exits 255 -> ExecResult(returncode=255)
+    script_with_stdout = _make_fake_ssh(
+        tmp_path,
+        """
+import sys
+sys.stdout.write("remote output\\n")
+sys.stderr.write("ssh: not an ssh error\\n")
+sys.exit(255)
+""",
+    )
+    res1 = await SshHostTransport(ssh_bin=script_with_stdout).exec_script(
+        host, "echo remote output; exit 255", timeout_seconds=5, max_output_bytes=1024
+    )
+    assert res1.returncode == 255
+    assert "remote output" in res1.output
+
+    # 2. Empty stdout + non-SSH stderr + exit 255 -> ExecResult(returncode=255)
+    script_non_ssh_err = _make_fake_ssh(
+        tmp_path,
+        """
+import sys
+sys.stderr.write("connection refused by local app\\n")
+sys.exit(255)
+""",
+    )
+    res2 = await SshHostTransport(ssh_bin=script_non_ssh_err).exec_script(
+        host, "exit 255", timeout_seconds=5, max_output_bytes=1024
+    )
+    assert res2.returncode == 255
+    assert "connection refused by local app" in res2.output
+
+    # 3. Empty stdout + SSH-prefixed stderr -> HostUnreachableError
+    ssh_transport_err = _make_fake_ssh(
+        tmp_path,
+        """
+import sys
+sys.stderr.write("ssh: connect to host 192.0.2.10 port 22: Connection refused\\n")
+sys.exit(255)
+""",
+    )
+    with pytest.raises(HostUnreachableError):
+        await SshHostTransport(ssh_bin=ssh_transport_err).exec_script(
+            host, "id", timeout_seconds=5, max_output_bytes=1024
+        )
+
+
+def test_bounded_exec_timeout_is_monotonic():
+    inputs = [0.5, 1.0, 5.0, 6.0, 9.0, 9.9, 10.0, 10.1, 30.0, 95.0, 120.0]
+    outputs = [_bounded_exec_timeout(x) for x in inputs]
+    assert outputs == sorted(outputs)
+    assert outputs[0] == 1.0
+    assert outputs[-1] == 90.0

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+import os
 import shlex
 import time
 from collections.abc import Sequence
@@ -21,10 +23,33 @@ from .transport import (
 
 _SSH_BIN = "/usr/bin/ssh"
 _MAX_SCRIPT_BYTES = 16384
-# Portable across Linux and stock macOS ARM64 without requiring GNU /usr/bin/timeout.
-# Timeout enforcement and process cleanup are handled on the Kule side.
-_REMOTE_BASH_CMD = "/bin/bash --noprofile --norc -s"
 _MINIMAL_ENV = {"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8"}
+
+
+def _remote_exec_command(timeout_seconds: float) -> str:
+    """Build a portable remote bash command with a remote-side timeout bound.
+
+    Uses ``timeout`` when available in PATH (Linux and macOS with coreutils),
+    and falls back to a POSIX ``sh`` watchdog (``SIGTERM`` after
+    ``ceil(timeout_seconds)``, ``SIGKILL`` 2s later) on stock macOS ARM64.
+    """
+    bound = max(1, math.ceil(timeout_seconds))
+    return (
+        "/bin/sh -c '"
+        "if command -v timeout >/dev/null 2>&1; then "
+        f"exec timeout -k 2 {bound} /bin/bash --noprofile --norc -s; "
+        "fi; "
+        "exec 3<&0; "
+        "/bin/bash --noprofile --norc -s <&3 3<&- & "
+        "child=$!; "
+        f'( sleep {bound}; kill -TERM "$child" 2>/dev/null; '
+        'sleep 2; kill -KILL "$child" 2>/dev/null ) </dev/null >/dev/null 2>&1 & '
+        "watchdog=$!; "
+        'wait "$child"; rc=$?; '
+        'kill "$watchdog" 2>/dev/null; wait "$watchdog" 2>/dev/null; '
+        'exit "$rc"\''
+    )
+
 
 _HOST_KEY_ERROR_MARKERS = (
     "host key verification failed",
@@ -34,20 +59,17 @@ _HOST_KEY_ERROR_MARKERS = (
     "are you sure you want to continue connecting",
 )
 
-_SSH_UNREACHABLE_MARKERS = (
-    "ssh: connect to host",
-    "connection refused",
-    "connection timed out",
-    "operation timed out",
+_SSH_ERROR_PREFIXES = (
+    "ssh:",
+    "ssh_",
+    "kex_exchange_identification:",
+    "banner exchange:",
+    "connection closed by ",
+    "connection reset by ",
     "could not resolve hostname",
-    "no route to host",
-    "network is unreachable",
-    "permission denied",
-    "connection closed by",
-    "connection reset by",
-    "kex_exchange_identification",
     "bad owner or permissions",
-    "load key",
+    "load key ",
+    "permission denied (",
 )
 
 
@@ -103,22 +125,33 @@ async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
             await proc.wait()
 
 
-async def _read_bounded(stream: asyncio.StreamReader, max_bytes: int) -> tuple[bytes, bool]:
-    buf = bytearray()
-    truncated = False
+async def _read_bounded(
+    stream: asyncio.StreamReader,
+    max_bytes: int,
+    buf: bytearray,
+    truncated_ref: list[bool],
+) -> None:
     while chunk := await stream.read(4096):
         remaining = max_bytes - len(buf)
         if remaining <= 0:
-            truncated = True
+            truncated_ref[0] = True
             continue
         if len(chunk) > remaining:
-            truncated = True
+            truncated_ref[0] = True
         buf.extend(chunk[:remaining])
-    return bytes(buf), truncated
 
 
 class SshHostTransport:
-    """Hardened SSH implementation of HostTransport for Linux and macOS ARM64 hosts."""
+    """Hardened SSH implementation of HostTransport for Linux and macOS ARM64 hosts.
+
+    Timeouts are enforced on both sides: Kule cancels and terminates the local
+    SSH client on ``timeout_seconds``, and ``exec_script`` wraps the remote bash
+    process in a portable ``timeout`` / POSIX ``sh`` watchdog. Note on residual
+    remote-process behavior: terminating the local SSH client or sending
+    ``SIGTERM``/``SIGKILL`` to the remote ``/bin/bash`` child does not
+    guarantee termination of detached background jobs or grandchildren spawned by
+    a script into separate sessions or process groups.
+    """
 
     def __init__(self, *, ssh_bin: str = _SSH_BIN) -> None:
         self._ssh_bin = ssh_bin
@@ -130,8 +163,9 @@ class SshHostTransport:
     def _validate_host_prereqs(self, host: HostConfig) -> None:
         if host.transport is not HostTransportType.SSH:
             raise TransportConfigError(f"host '{host.host_id}' does not use SSH transport")
-        if not Path(self._ssh_bin).is_file():
-            raise TransportConfigError("SSH client binary is missing")
+        ssh_path = Path(self._ssh_bin)
+        if not ssh_path.is_file() or not os.access(ssh_path, os.X_OK):
+            raise TransportConfigError("SSH client binary is missing or not executable")
         if not host.ssh.key_path.is_file():
             raise TransportConfigError(f"SSH private key missing for host '{host.host_id}'")
         if not host.ssh.known_hosts_path.is_file():
@@ -208,8 +242,10 @@ class SshHostTransport:
                 stderr=asyncio.subprocess.PIPE,
                 env=_MINIMAL_ENV,
             )
-        except FileNotFoundError:
-            raise TransportConfigError("SSH client binary is missing") from None
+        except OSError as exc:
+            raise TransportConfigError(
+                f"failed to launch SSH client: {exc.__class__.__name__}"
+            ) from None
 
         assert proc.stdout is not None and proc.stderr is not None
 
@@ -225,20 +261,20 @@ class SshHostTransport:
                 with suppress(Exception):
                     proc.stdin.close()
 
-        stdout_bytes = b""
-        stderr_bytes = b""
-        truncated = False
+        stdout_buf = bytearray()
+        stderr_buf = bytearray()
+        out_trunc = [False]
+        err_trunc = [False]
         timed_out = False
         returncode: int | None = None
 
         try:
             async with asyncio.timeout(timeout_seconds):
-                _, (stdout_bytes, out_trunc), (stderr_bytes, err_trunc) = await asyncio.gather(
+                await asyncio.gather(
                     _send(),
-                    _read_bounded(proc.stdout, max_output_bytes),
-                    _read_bounded(proc.stderr, max_output_bytes),
+                    _read_bounded(proc.stdout, max_output_bytes, stdout_buf, out_trunc),
+                    _read_bounded(proc.stderr, max_output_bytes, stderr_buf, err_trunc),
                 )
-                truncated = out_trunc or err_trunc
                 returncode = await proc.wait()
         except TimeoutError:
             timed_out = True
@@ -258,25 +294,37 @@ class SshHostTransport:
                     await proc.wait()
 
         duration_ms = int((time.monotonic() - start) * 1000)
-        return returncode, stdout_bytes, stderr_bytes, truncated, timed_out, duration_ms
+        return (
+            returncode,
+            bytes(stdout_buf),
+            bytes(stderr_buf),
+            out_trunc[0] or err_trunc[0],
+            timed_out,
+            duration_ms,
+        )
 
     def _classify_ssh_failure(
         self,
         host: HostConfig,
         returncode: int | None,
+        stdout_bytes: bytes,
         stderr_bytes: bytes,
         *,
         strict_255: bool = False,
     ) -> None:
         if returncode != 255:
             return
+        if not strict_255 and stdout_bytes:
+            return
         stderr_text = stderr_bytes.decode("utf-8", errors="replace")
-        lowered = stderr_text.lower()
-        if any(marker in lowered for marker in _HOST_KEY_ERROR_MARKERS):
+        lines = [line.strip().lower() for line in stderr_text.splitlines() if line.strip()]
+        if any(line.startswith(_HOST_KEY_ERROR_MARKERS) for line in lines):
             raise HostKeyVerificationError(
                 f"SSH host key verification failed for host '{host.host_id}'"
             )
-        if strict_255 or any(marker in lowered for marker in _SSH_UNREACHABLE_MARKERS):
+        if strict_255 or (
+            not stdout_bytes and any(line.startswith(_SSH_ERROR_PREFIXES) for line in lines)
+        ):
             detail = _scrub_error(stderr_text, host)
             msg = f"host '{host.host_id}' unreachable" + (f": {detail}" if detail else "")
             raise HostUnreachableError(msg)
@@ -296,7 +344,7 @@ class SshHostTransport:
         )
         if timed_out:
             raise HostUnreachableError(f"host '{host.host_id}' status check timed out")
-        self._classify_ssh_failure(host, rc, stderr_bytes, strict_255=True)
+        self._classify_ssh_failure(host, rc, stdout_bytes, stderr_bytes, strict_255=True)
         if rc != 0:
             detail = _scrub_error(stderr_bytes.decode("utf-8", errors="replace"), host)
             raise HostUnreachableError(
@@ -340,7 +388,7 @@ class SshHostTransport:
                 duration_ms=duration_ms,
                 error=f"command timed out after {timeout_seconds:g}s",
             )
-        self._classify_ssh_failure(host, rc, stderr_bytes, strict_255=False)
+        self._classify_ssh_failure(host, rc, stdout_bytes, stderr_bytes, strict_255=False)
         error = (
             _scrub_error(stderr_bytes.decode("utf-8", errors="replace"), host)
             if rc != 0 and stderr_bytes
@@ -365,16 +413,24 @@ class SshHostTransport:
         timeout_seconds: float,
         max_output_bytes: int,
     ) -> ExecResult:
+        """Execute a bounded Bash script over SSH with both local and remote timeouts.
+
+        Residual remote-process behavior: killing the local SSH client or
+        sending ``SIGTERM``/``SIGKILL`` to the remote ``/bin/bash`` child does
+        not guarantee termination of detached background jobs or grandchildren
+        spawned into separate sessions/process groups.
+        """
         raw = _validate_script(script)
+        remote_cmd = _remote_exec_command(timeout_seconds)
         rc, stdout_bytes, stderr_bytes, truncated, timed_out, duration_ms = await self._run_ssh(
             host,
-            _REMOTE_BASH_CMD,
+            remote_cmd,
             stdin_data=raw,
             timeout_seconds=timeout_seconds,
             max_output_bytes=max_output_bytes,
         )
         if not timed_out:
-            self._classify_ssh_failure(host, rc, stderr_bytes, strict_255=False)
+            self._classify_ssh_failure(host, rc, stdout_bytes, stderr_bytes, strict_255=False)
 
         combined = stdout_bytes + stderr_bytes
         if len(combined) > max_output_bytes:
