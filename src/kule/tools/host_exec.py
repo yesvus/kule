@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import signal
+import time
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
@@ -28,9 +31,16 @@ def _configured_target() -> str:
 
 _MAX_SCRIPT = 16384
 _SSH = "/usr/bin/ssh"
+_LOCAL_TIMEOUT_GRACE = 8.0
+_KILL_GRACE = 0.5
+_DRAIN_TIMEOUT = 0.2
 
 
-def _argv(seconds: int) -> list[str]:
+def _effective_timeout_seconds(cfg: Config) -> int:
+    return min(90, int(cfg.tools.timeout_seconds) - 10)
+
+
+def _argv(seconds: int | float) -> list[str]:
     return [
         _SSH,
         "-F",
@@ -63,18 +73,63 @@ def _argv(seconds: int) -> list[str]:
     ]
 
 
-async def _run(script: bytes, seconds: int, max_bytes: int) -> dict:
+def _signal_process_group(proc: asyncio.subprocess.Process, sig: signal.Signals) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except (ProcessLookupError, PermissionError):
+        if proc.returncode is None:
+            with suppress(ProcessLookupError):
+                proc.send_signal(sig)
+
+
+async def _terminate_process_group(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is None:
+        _signal_process_group(proc, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE)
+        except TimeoutError:
+            pass
+    # Always follow up with SIGKILL on the process group so descendants that
+    # ignored SIGTERM or outlived the group leader cannot keep running.
+    _signal_process_group(proc, signal.SIGKILL)
+    if proc.returncode is None:
+        await proc.wait()
+
+
+async def _drain_remaining(
+    stream: asyncio.StreamReader,
+    append: Callable[[bytes], None],
+    timeout: float = _DRAIN_TIMEOUT,
+) -> None:
+    with suppress(TimeoutError):
+        async with asyncio.timeout(timeout):
+            while chunk := await stream.read(4096):
+                append(chunk)
+
+
+async def _run(script: bytes, seconds: int | float, max_bytes: int) -> dict:
     # Script is supplied on stdin, not as an argv entry or a local shell.
+    # Start a new session so the subprocess leads its own process group and
+    # timeout/cancellation cleanup terminates the entire process tree.
     proc = await asyncio.create_subprocess_exec(
         *_argv(seconds),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
         env={"PATH": "/usr/bin:/bin", "HOME": "/nonexistent", "LANG": "C.UTF-8"},
     )
     assert proc.stdin is not None and proc.stdout is not None
     output = bytearray()
     truncated = False
+
+    def append_output(chunk: bytes) -> None:
+        nonlocal truncated
+        remaining = max_bytes - len(output)
+        if len(chunk) > remaining:
+            truncated = True
+        if remaining > 0:
+            output.extend(chunk[:remaining])
 
     async def send() -> None:
         try:
@@ -86,27 +141,43 @@ async def _run(script: bytes, seconds: int, max_bytes: int) -> dict:
             proc.stdin.close()
 
     async def receive() -> None:
-        nonlocal truncated
         while chunk := await proc.stdout.read(4096):
-            remaining = max_bytes - len(output)
-            if len(chunk) > remaining:
-                truncated = True
-            output.extend(chunk[:remaining])
+            append_output(chunk)
 
+    started = time.monotonic()
+    timed_out = False
+    code: int | None = None
     try:
-        async with asyncio.timeout(seconds + 8):
-            await asyncio.gather(send(), receive())
-            code = await proc.wait()
+        try:
+            async with asyncio.timeout(seconds + _LOCAL_TIMEOUT_GRACE):
+                await asyncio.gather(send(), receive())
+                code = await proc.wait()
+        except TimeoutError:
+            timed_out = True
+            await _terminate_process_group(proc)
+            await _drain_remaining(proc.stdout, append_output)
+            code = proc.returncode
+        else:
+            elapsed = time.monotonic() - started
+            if code == 124 or (code == 137 and elapsed >= seconds):
+                timed_out = True
+                _signal_process_group(proc, signal.SIGKILL)
     finally:
+        if not proc.stdin.is_closing():
+            proc.stdin.close()
         if proc.returncode is None:
-            with suppress(ProcessLookupError):
-                proc.kill()
-            await proc.communicate()
+            _signal_process_group(proc, signal.SIGKILL)
+            with suppress(TimeoutError):
+                await asyncio.wait_for(proc.wait(), timeout=1.0)
+    if timed_out and code in (None, 0):
+        code = 124
     return {
         "host": "configured-host",
         "returncode": code,
         "output": redact_text(output.decode("utf-8", errors="replace")),
         "truncated": truncated,
+        "timed_out": timed_out,
+        "timeout_seconds": seconds,
     }
 
 
@@ -121,13 +192,22 @@ def register(mcp: FastMCP, cfg: Config) -> None:
     if not (_KEY.is_file() and _KNOWN_HOSTS.is_file() and Path(_SSH).is_file()):
         raise RuntimeError("Host SSH executor prerequisites are missing")
 
-    @mcp.tool(tags={EXEC}, annotations={"readOnlyHint": False, "destructiveHint": True})
-    async def host_exec(script: str) -> dict:
-        """Execute a bounded Bash script on the configured, authorized host.
+    effective_limit = _effective_timeout_seconds(cfg)
+    description = (
+        f"Execute a bounded Bash script on the configured, authorized host "
+        f"(effective timeout: {effective_limit}s).\n\n"
+        "Broad host and Kubernetes authority; not a sandbox. Never return secret "
+        "material. Do not use this tool from an untrusted developer session. "
+        f"Scripts exceeding {effective_limit}s are terminated and return the "
+        "captured partial output with timed_out=true."
+    )
 
-        Broad host and Kubernetes authority; not a sandbox. Never return secret
-        material. Do not use this tool from an untrusted developer session.
-        """
+    @mcp.tool(
+        description=description,
+        tags={EXEC},
+        annotations={"readOnlyHint": False, "destructiveHint": True},
+    )
+    async def host_exec(script: str) -> dict:
         if not script.strip() or len(script) > _MAX_SCRIPT:
             raise ValueError("script must be nonempty and at most 16384 UTF-8 bytes")
         try:
@@ -136,7 +216,7 @@ def register(mcp: FastMCP, cfg: Config) -> None:
             raise ValueError("script must be UTF-8") from None
         if len(raw) > _MAX_SCRIPT or b"\x00" in raw:
             raise ValueError("invalid script size or encoding")
-        seconds = min(90, int(cfg.tools.timeout_seconds) - 10)
+        seconds = _effective_timeout_seconds(cfg)
         # FastMCP serializes both structured and text results. Leave headroom.
         cap = min(4096, max(128, cfg.tools.max_output_bytes // 16))
         return await _run(raw, seconds, cap)
